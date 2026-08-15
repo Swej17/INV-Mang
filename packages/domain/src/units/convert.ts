@@ -27,7 +27,7 @@ const Decimal = BaseDecimal.clone({ precision: 40, toExpNeg: -40, toExpPos: 40 }
  * Permits an optional sign, no leading zeroes beyond "0" itself, and any
  * number of fractional digits (so "1.500" still normalises to "1.5").
  */
-const CANONICAL_DECIMAL = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
+export const CANONICAL_DECIMAL = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
 
 /** Reject anything that is not a canonical base-10 decimal literal. */
 function parse(value: string): InstanceType<typeof Decimal> {

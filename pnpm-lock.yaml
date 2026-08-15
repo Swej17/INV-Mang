@@ -40,7 +40,14 @@ importers:
 
   packages/application: {}
 
-  packages/contracts: {}
+  packages/contracts:
+    dependencies:
+      '@simple-flame/domain':
+        specifier: workspace:*
+        version: link:../domain
+      zod:
+        specifier: 4.1.5
+        version: 4.1.5
 
   packages/domain:
     dependencies:
@@ -1098,6 +1105,9 @@ packages:
     resolution: {integrity: sha512-rVksvsnNCdJ/ohGc6xgPwyN8eheCxsiLM8mxuE/t/mOVqJewPuO1miLpTHQiRgTKCLexL4MeAFVagts7HmNZ2Q==}
     engines: {node: '>=10'}
 
+  zod@4.1.5:
+    resolution: {integrity: sha512-rcUUZqlLJgBC33IT3PNMgsCq6TzLQEG/Ei/KTCU0PedSWRMAXoOUN+4t/0H+Q8bdnLPdqUYnvboJT0bn/229qg==}
+
 snapshots:
 
   '@esbuild/aix-ppc64@0.28.2':
@@ -2043,3 +2053,5 @@ snapshots:
   word-wrap@1.2.5: {}
 
   yocto-queue@0.1.0: {}
+
+  zod@4.1.5: {}

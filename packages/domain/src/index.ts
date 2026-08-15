@@ -7,5 +7,13 @@ export {
   baseUnitOf,
   dimensionOf,
 } from "./units/types.js";
-export { convertQuantity } from "./units/convert.js";
+export { convertQuantity, CANONICAL_DECIMAL } from "./units/convert.js";
 export { addQuantity, compareQuantity } from "./units/quantity.js";
+export {
+  type DependencyClass,
+  type InventoryItem,
+  type InventoryProjection,
+  type ItemCategory,
+  type LocationId,
+  type OrganizationId,
+} from "./inventory/types.js";
