@@ -1,0 +1,27 @@
+{
+  "name": "simple-flame-inventory",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "packageManager": "pnpm@10.15.0",
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "check:boundaries": "node scripts/check-boundaries.mjs",
+    "lint": "eslint .",
+    "test": "node --test scripts/check-boundaries.test.mjs && vitest run --passWithNoTests",
+    "test:e2e": "vitest run --passWithNoTests --dir e2e",
+    "typecheck": "pnpm -r --if-present typecheck"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.34.0",
+    "eslint": "9.34.0",
+    "globals": "16.3.0",
+    "prettier": "3.6.2",
+    "typescript": "5.9.2",
+    "typescript-eslint": "8.41.0",
+    "vitest": "3.2.4"
+  }
+}

@@ -3,8 +3,24 @@
 .claude/*
 !.claude/settings.json
 
+# Dependencies and generated outputs
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+*.log
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
 # Superpowers scratch: ports, pids, tokens, generated HTML
 .superpowers/
+
+# Desktop build output
+apps/desktop/src-tauri/target/
 
 # OS / editor noise
 Thumbs.db
