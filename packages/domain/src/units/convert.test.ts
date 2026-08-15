@@ -70,6 +70,45 @@ describe("convertQuantity", () => {
     );
   });
 
+  describe("canonical decimal grammar", () => {
+    // decimal.js would happily reinterpret every one of these. A malformed
+    // external string must fail, never silently become a different quantity.
+    it.each([
+      ["hex radix", "0xff"],
+      ["binary radix", "0b101"],
+      ["octal radix", "0o17"],
+      ["exponent notation", "1e3"],
+      ["negative exponent", "1e-3"],
+      ["capital exponent", "1E3"],
+      ["leading plus", "+1"],
+      ["leading whitespace", " 1"],
+      ["trailing whitespace", "1 "],
+      ["not a number", "NaN"],
+      ["infinity", "Infinity"],
+      ["negative infinity", "-Infinity"],
+      ["empty string", ""],
+      ["bare decimal point", "."],
+      ["missing integer part", ".5"],
+      ["trailing decimal point", "1."],
+      ["leading zero", "01"],
+      ["thousands separator", "1,000"],
+      ["double sign", "--1"],
+      ["underscore separator", "1_000"],
+    ])("rejects %s", (_label, value) => {
+      expect(() => convertQuantity({ value, unit: "GRAM" }, "GRAM")).toThrow("invalid quantity");
+    });
+
+    it.each([
+      ["zero", "0"],
+      ["negative", "-1.5"],
+      ["trailing zeroes", "1.500"],
+      ["high precision", "0.00000001"],
+      ["numeric(24,8) upper bound", "9999999999999999.99999999"],
+    ])("accepts %s", (_label, value) => {
+      expect(() => convertQuantity({ value, unit: "GRAM" }, "GRAM")).not.toThrow();
+    });
+  });
+
   it("preserves eaches under identity conversion", () => {
     expect(convertQuantity({ value: "12", unit: "EACH" }, "EACH")).toEqual({
       value: "12",

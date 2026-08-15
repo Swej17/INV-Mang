@@ -1,4 +1,4 @@
-import { Decimal, convertQuantity, toDecimal } from "./convert.js";
+import { convertQuantity, toDecimal } from "./convert.js";
 import { type DisplayUnit, type Quantity, baseUnitOf, dimensionOf } from "./types.js";
 
 /**
@@ -36,9 +36,4 @@ export function compareQuantity(a: Quantity, b: Quantity): -1 | 0 | 1 {
     throw new Error("invalid quantity: comparison is undefined");
   }
   return comparison < 0 ? -1 : comparison > 0 ? 1 : 0;
-}
-
-/** Convenience predicate; keeps call sites from re-deriving the semantics. */
-export function isZeroQuantity(quantity: Quantity): boolean {
-  return new Decimal(quantity.value).isZero();
 }

@@ -15,14 +15,26 @@ import {
  */
 const Decimal = BaseDecimal.clone({ precision: 40, toExpNeg: -40, toExpPos: 40 });
 
-/** Reject anything that is not a finite decimal literal before doing math. */
+/**
+ * The only quantity spelling this system accepts.
+ *
+ * Deliberately narrower than what decimal.js will parse. Left to itself
+ * decimal.js accepts radix prefixes, exponent notation and a leading plus, so
+ * "0xff" would become 255 and "1e3" would become 1000 — a malformed external
+ * string silently turning into a materially different ledger quantity. A
+ * quantity must be rejected at the boundary, not reinterpreted.
+ *
+ * Permits an optional sign, no leading zeroes beyond "0" itself, and any
+ * number of fractional digits (so "1.500" still normalises to "1.5").
+ */
+const CANONICAL_DECIMAL = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
+
+/** Reject anything that is not a canonical base-10 decimal literal. */
 function parse(value: string): InstanceType<typeof Decimal> {
-  let parsed: InstanceType<typeof Decimal>;
-  try {
-    parsed = new Decimal(value);
-  } catch {
+  if (typeof value !== "string" || !CANONICAL_DECIMAL.test(value)) {
     throw new Error(`invalid quantity: ${value}`);
   }
+  const parsed = new Decimal(value);
   if (!parsed.isFinite()) {
     throw new Error(`invalid quantity: ${value}`);
   }

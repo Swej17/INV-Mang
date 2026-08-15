@@ -8,4 +8,4 @@ export {
   dimensionOf,
 } from "./units/types.js";
 export { convertQuantity } from "./units/convert.js";
-export { addQuantity, compareQuantity, isZeroQuantity } from "./units/quantity.js";
+export { addQuantity, compareQuantity } from "./units/quantity.js";
