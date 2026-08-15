@@ -1,0 +1,14 @@
+# Agent session state — local to each machine, never shared
+.codex/
+.claude/*
+!.claude/settings.json
+
+# Superpowers scratch: ports, pids, tokens, generated HTML
+.superpowers/
+
+# OS / editor noise
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
