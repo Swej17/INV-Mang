@@ -6,6 +6,10 @@
   "exports": "./src/index.ts",
   "scripts": {
     "build": "tsc --project tsconfig.json",
+    "test": "vitest run",
     "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "decimal.js": "10.6.0"
   }
 }
