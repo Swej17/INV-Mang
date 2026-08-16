@@ -3,9 +3,17 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./contract": "./src/inventory-ledger.contract.ts"
+  },
   "scripts": {
     "build": "tsc --project tsconfig.json",
-    "typecheck": "tsc --project tsconfig.json --noEmit"
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@simple-flame/contracts": "workspace:*",
+    "@simple-flame/domain": "workspace:*"
   }
 }

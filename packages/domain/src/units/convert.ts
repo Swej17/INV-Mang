@@ -29,8 +29,14 @@ const Decimal = BaseDecimal.clone({ precision: 40, toExpNeg: -40, toExpPos: 40 }
  */
 export const CANONICAL_DECIMAL = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
 
-/** Reject anything that is not a canonical base-10 decimal literal. */
-function parse(value: string): InstanceType<typeof Decimal> {
+/**
+ * Reject anything that is not a canonical base-10 decimal literal.
+ *
+ * Exported so every layer that handles a raw quantity string — conversion,
+ * ledger projection, persistence — validates through one implementation. A
+ * second copy of this check would eventually disagree with this one.
+ */
+export function assertCanonicalDecimal(value: string): InstanceType<typeof Decimal> {
   if (typeof value !== "string" || !CANONICAL_DECIMAL.test(value)) {
     throw new Error(`invalid quantity: ${value}`);
   }
@@ -40,6 +46,8 @@ function parse(value: string): InstanceType<typeof Decimal> {
   }
   return parsed;
 }
+
+const parse = assertCanonicalDecimal;
 
 /**
  * Render without exponent notation and without trailing zeroes, so that the

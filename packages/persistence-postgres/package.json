@@ -6,6 +6,18 @@
   "exports": "./src/index.ts",
   "scripts": {
     "build": "tsc --project tsconfig.json",
-    "typecheck": "tsc --project tsconfig.json --noEmit"
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
+  },
+  "dependencies": {
+    "@simple-flame/contracts": "workspace:*",
+    "@simple-flame/domain": "workspace:*",
+    "@simple-flame/persistence-contracts": "workspace:*",
+    "drizzle-orm": "0.44.5",
+    "postgres": "3.4.7"
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "11.7.1"
   }
 }

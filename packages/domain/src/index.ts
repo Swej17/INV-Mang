@@ -7,7 +7,7 @@ export {
   baseUnitOf,
   dimensionOf,
 } from "./units/types.js";
-export { convertQuantity, CANONICAL_DECIMAL } from "./units/convert.js";
+export { convertQuantity, CANONICAL_DECIMAL, assertCanonicalDecimal } from "./units/convert.js";
 export { addQuantity, compareQuantity } from "./units/quantity.js";
 export {
   type DependencyClass,
@@ -17,3 +17,10 @@ export {
   type LocationId,
   type OrganizationId,
 } from "./inventory/types.js";
+export { LEDGER_CAUSES, type LedgerCauseName } from "./inventory/ledger-causes.js";
+export {
+  type InventoryProjectionResult,
+  type LedgerEntryInput,
+  type ProjectionOptions,
+  projectInventory,
+} from "./inventory/project.js";
