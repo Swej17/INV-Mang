@@ -90,7 +90,11 @@ importers:
 
   packages/sync: {}
 
-  packages/test-kit: {}
+  packages/test-kit:
+    dependencies:
+      '@simple-flame/domain':
+        specifier: workspace:*
+        version: link:../domain
 
   packages/ui: {}
 

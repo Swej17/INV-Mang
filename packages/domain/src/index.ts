@@ -24,3 +24,12 @@ export {
   type ProjectionOptions,
   projectInventory,
 } from "./inventory/project.js";
+export {
+  type CapacityInput,
+  type CapacityResult,
+  type ComponentShortfall,
+  type LossPolicy,
+  type RecipeComponent,
+  calculateCapacity,
+  requiredForUnits,
+} from "./capacity/calculate-capacity.js";
