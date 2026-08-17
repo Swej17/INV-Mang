@@ -38,7 +38,17 @@ importers:
 
   apps/worker: {}
 
-  packages/application: {}
+  packages/application:
+    dependencies:
+      '@simple-flame/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@simple-flame/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@simple-flame/persistence-contracts':
+        specifier: workspace:*
+        version: link:../persistence-contracts
 
   packages/contracts:
     dependencies:
@@ -68,6 +78,9 @@ importers:
 
   packages/persistence-postgres:
     dependencies:
+      '@simple-flame/application':
+        specifier: workspace:*
+        version: link:../application
       '@simple-flame/contracts':
         specifier: workspace:*
         version: link:../contracts

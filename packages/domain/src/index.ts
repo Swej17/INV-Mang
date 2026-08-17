@@ -43,3 +43,4 @@ export {
   allocateProduction,
   comparePriority,
 } from "./allocation/allocate-production.js";
+export { type Lot, type LotDraw, selectFifoLots, totalDrawn } from "./lots/select-fifo.js";

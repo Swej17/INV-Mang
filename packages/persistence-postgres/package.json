@@ -15,7 +15,8 @@
     "@simple-flame/domain": "workspace:*",
     "@simple-flame/persistence-contracts": "workspace:*",
     "drizzle-orm": "0.44.5",
-    "postgres": "3.4.7"
+    "postgres": "3.4.7",
+    "@simple-flame/application": "workspace:*"
   },
   "devDependencies": {
     "@testcontainers/postgresql": "11.7.1"

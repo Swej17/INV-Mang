@@ -53,6 +53,11 @@ export class PostgresInventoryLedgerRepository implements InventoryLedgerReposit
       for (const draft of entries) {
         records.push({
           ...draft,
+          // Quantised before the value is used for validation OR returned, so
+          // the caller, the check and the row all agree.
+          onHandDelta: quantise(draft.onHandDelta),
+          reservedDelta: quantise(draft.reservedDelta),
+          incomingDelta: quantise(draft.incomingDelta),
           eventId: randomUUID(),
           commandId,
           organizationId,
@@ -200,6 +205,26 @@ export class PostgresInventoryLedgerRepository implements InventoryLedgerReposit
   async listEntries(itemId: string): Promise<readonly LedgerEntryRecord[]> {
     return this.readEntries(this.sql, itemId);
   }
+}
+
+/**
+ * Storage granularity, taken from the schema: numeric(24, 8).
+ *
+ * The domain computes at 40 digits, so a converted quantity can carry more than
+ * eight decimals — 15.7 oz is exactly 445.0875130625 g, which has ten. Inserted
+ * raw, PostgreSQL rounds it silently and a read-back no longer equals what was
+ * written. Quantising HERE makes that loss explicit and single-sited: what a
+ * caller is told was stored is exactly what was stored.
+ *
+ * Eight decimals of a gram is ten nanograms, far below any meaningful quantity
+ * of wax. But "small enough not to matter" is a judgement that belongs in a
+ * comment, not in an invisible database rounding.
+ */
+const STORAGE_DECIMALS = 8;
+
+/** Round a domain quantity to what the column can actually hold. */
+function quantise(value: string): string {
+  return assertCanonicalDecimal(value).toDecimalPlaces(STORAGE_DECIMALS).toFixed();
 }
 
 /**
