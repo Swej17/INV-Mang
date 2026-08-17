@@ -44,3 +44,13 @@ export {
   comparePriority,
 } from "./allocation/allocate-production.js";
 export { type Lot, type LotDraw, selectFifoLots, totalDrawn } from "./lots/select-fifo.js";
+export {
+  type FulfillmentReadiness,
+  type OrderEvaluationInput,
+  type OrderEvaluationResult,
+  type OrderLine,
+  type OrderShortage,
+  type PackingComponent,
+  type ProductionReadiness,
+  evaluateOrder,
+} from "./orders/evaluate-order.js";
