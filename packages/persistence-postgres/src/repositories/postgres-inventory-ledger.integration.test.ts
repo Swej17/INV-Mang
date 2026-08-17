@@ -2,17 +2,17 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { runInventoryLedgerContract } from "@simple-flame/persistence-contracts/contract";
-import postgres, { type Sql } from "postgres";
 import { afterAll } from "vitest";
 
-import { startDisposablePostgres, type DisposablePostgres } from "../testing/podman-postgres.js";
+import { createDisposableDatabase, type DisposableDatabase } from "../testing/disposable-postgres.js";
 import { PostgresInventoryLedgerRepository } from "./postgres-inventory-ledger.js";
 
 /**
- * Runs the shared ledger contract against a REAL PostgreSQL 17 in a disposable
- * Podman container. An in-memory fake would not exercise what actually matters
- * here: numeric(24,8) exactness, the append-only trigger, the advisory lock,
- * and transactional rollback.
+ * Runs the shared ledger contract against a REAL PostgreSQL 17 database.
+ *
+ * An in-memory fake would not exercise what actually matters here:
+ * numeric(24,8) exactness, the append-only trigger, the advisory lock, and
+ * transactional rollback.
  */
 
 const MIGRATION = readFileSync(
@@ -20,36 +20,33 @@ const MIGRATION = readFileSync(
   "utf8",
 );
 
-let container: DisposablePostgres | undefined;
-let sql: Sql | undefined;
+let database: DisposableDatabase | undefined;
 
-async function ensureStarted(): Promise<Sql> {
-  if (sql) return sql;
-  container = await startDisposablePostgres();
-  sql = postgres(container.connectionUri, { max: 5, onnotice: () => {} });
-  await sql.unsafe(MIGRATION);
-  return sql;
+async function ensureStarted(): Promise<DisposableDatabase> {
+  if (database) return database;
+  database = await createDisposableDatabase();
+  await database.sql.unsafe(MIGRATION);
+  return database;
 }
 
 afterAll(async () => {
-  await sql?.end({ timeout: 5 });
-  await container?.stop();
+  await database?.drop();
 });
 
 runInventoryLedgerContract("PostgreSQL", async () => {
-  const connection = await ensureStarted();
+  const { sql } = await ensureStarted();
   return {
-    repository: new PostgresInventoryLedgerRepository(connection),
+    repository: new PostgresInventoryLedgerRepository(sql),
     reset: async () => {
       // TRUNCATE bypasses the append-only trigger by design: this is a fixture
       // reset, not a production correction path.
-      await connection.unsafe(
+      await sql.unsafe(
         "TRUNCATE inventory_ledger_entries, processed_commands RESTART IDENTITY CASCADE",
       );
-      await connection.unsafe("ALTER SEQUENCE inventory_revision_seq RESTART WITH 1");
+      await sql.unsafe("ALTER SEQUENCE inventory_revision_seq RESTART WITH 1");
     },
     dispose: async () => {
-      /* container is shared across the suite and removed in afterAll */
+      /* database is shared across the suite and dropped in afterAll */
     },
   };
 });

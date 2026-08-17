@@ -107,19 +107,35 @@ export function runInventoryLedgerContract(
       }
     });
 
-    it("does not allocate the same stock to two concurrent reservations", async () => {
+    it("does not allocate the same stock to concurrent reservations", async () => {
       const { repository, reset, dispose } = await createRepository();
       try {
         await reset();
         await repository.appendOnce("0199a1f0-0000-7000-8000-0000000000c6", ORG, [receipt("10")]);
 
-        const results = await Promise.allSettled([
-          repository.appendOnce("0199a1f0-0000-7000-8000-0000000000c7", ORG, [reservation("8")]),
-          repository.appendOnce("0199a1f0-0000-7000-8000-0000000000c8", ORG, [reservation("8")]),
-        ]);
+        // Eight racers, each wanting 8 of the 10 on hand, so at most ONE can
+        // legitimately win.
+        //
+        // KNOWN LIMITATION, do not read more into a green result than it earns:
+        // this asserts the OUTCOME (no double allocation) but does not prove the
+        // adapter's serialisation mechanism is what produces it. Mutation-tested
+        // against the PostgreSQL adapter with its advisory lock deleted and this
+        // test still passed, because postgres.js dispatches these calls over its
+        // pool such that each transaction observes the previous commit. Proving
+        // the lock is load-bearing needs genuinely interleaved transactions on
+        // separate connections with a barrier between read and write. Flagged
+        // for the final review pass rather than left as an implied guarantee.
+        const racers = Array.from({ length: 8 }, (_, index) =>
+          repository.appendOnce(
+            `0199a1f0-0000-7000-8000-0000000000${(0xd0 + index).toString(16)}`,
+            ORG,
+            [reservation("8")],
+          ),
+        );
+        const results = await Promise.allSettled(racers);
 
         const fulfilled = results.filter((result) => result.status === "fulfilled");
-        // Exactly one may win. Both winning would promise stock twice.
+        // More than one winner means the same stock was promised twice.
         expect(fulfilled).toHaveLength(1);
         expect((await repository.getProjection(ITEM, LOCATION)).reserved).toBe("8");
       } finally {
