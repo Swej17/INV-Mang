@@ -1,4 +1,4 @@
-import { Decimal, assertCanonicalDecimal } from "../units/convert.js";
+import { Decimal, assertNonNegativeDecimal } from "../units/convert.js";
 import type { DependencyClass } from "../inventory/types.js";
 
 /**
@@ -76,7 +76,12 @@ export function requiredForUnits(
   units: bigint,
   lossEnabled: boolean,
 ): InstanceType<typeof Decimal> {
-  const perUnit = assertCanonicalDecimal(component.perUnitBase);
+  const perUnit = assertNonNegativeDecimal(component.perUnitBase, `perUnitBase for ${component.itemId}`);
+  if (perUnit.isZero()) {
+    // An item that consumes nothing is a data error, and it also makes the
+    // capacity search unbounded: every unit count "fits".
+    throw new Error(`perUnitBase for ${component.itemId} must be greater than zero`);
+  }
   const count = new Decimal(units.toString());
   let required = perUnit.times(count);
 
@@ -84,15 +89,19 @@ export function requiredForUnits(
 
   const loss = component.loss;
   if (loss.mode === "PERCENT_PER_UNIT" || loss.mode === "BOTH") {
-    required = required.times(new Decimal(1).plus(assertCanonicalDecimal(loss.percentage)));
+    required = required.times(
+      new Decimal(1).plus(assertNonNegativeDecimal(loss.percentage, "loss.percentage")),
+    );
   }
   if (loss.mode === "FIXED_PER_BATCH" || loss.mode === "BOTH") {
-    if (loss.batchSize <= 0) {
-      throw new Error(`batchSize must be positive for ${component.itemId}`);
+    if (!Number.isInteger(loss.batchSize) || loss.batchSize <= 0) {
+      throw new Error(`batchSize must be a positive integer for ${component.itemId}`);
     }
     // ceil, not round: a partial batch still incurs the whole batch loss.
     const batches = count.dividedBy(loss.batchSize).ceil();
-    required = required.plus(batches.times(assertCanonicalDecimal(loss.fixedPerBatchBase)));
+    required = required.plus(
+      batches.times(assertNonNegativeDecimal(loss.fixedPerBatchBase, "loss.fixedPerBatchBase")),
+    );
   }
   return required;
 }
@@ -143,10 +152,12 @@ function availableFor(
   // An item with no entry is absent, not unlimited. Treating a missing key as
   // infinite would silently promise material nobody has.
   const raw = input.availableByItem[itemId] ?? "0";
-  let available = assertCanonicalDecimal(raw);
+  let available = assertNonNegativeDecimal(raw, `availableByItem[${itemId}]`);
   if (applyProtection) {
     const held = input.protectedByItem?.[itemId];
-    if (held !== undefined) available = available.minus(assertCanonicalDecimal(held));
+    if (held !== undefined) {
+      available = available.minus(assertNonNegativeDecimal(held, `protectedByItem[${itemId}]`));
+    }
   }
   return available.isNegative() ? new Decimal(0) : available;
 }

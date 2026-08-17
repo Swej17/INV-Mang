@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { LEDGER_CAUSES } from "@simple-flame/domain";
+
 import { DecimalString, IsoDateTime, Revision, Uuid } from "./common.js";
 
 /**
@@ -10,22 +12,15 @@ import { DecimalString, IsoDateTime, Revision, Uuid } from "./common.js";
  * point in time survives the correction.
  */
 
-export const LedgerCause = z.enum([
-  "RECEIPT",
-  "PHYSICAL_COUNT_ADJUSTMENT",
-  "DAMAGE_OR_SPOILAGE",
-  "PRODUCTION_ALLOCATION",
-  "PRODUCTION_CONSUMPTION",
-  "PRODUCTION_OUTPUT",
-  "ORDER_RESERVATION",
-  "RESERVATION_RELEASE",
-  "FULFILLMENT_CONSUMPTION",
-  "CUSTOMER_RETURN",
-  "VENDOR_RETURN",
-  "PROCESS_LOSS",
-  "SYNCHRONIZATION_CORRECTION",
-  "ADMINISTRATIVE_REVERSAL",
-]);
+/**
+ * Derived from the domain constant, never restated.
+ *
+ * A review proved the cost of duplication here: this vocabulary existed in three
+ * places — domain, this schema, and the SQL CHECK — and mutations that deleted a
+ * cause from the domain array or the CHECK both survived, because only this copy
+ * was tested. Deriving means the domain and the wire schema now fail together.
+ */
+export const LedgerCause = z.enum(LEDGER_CAUSES);
 
 export const InventoryEventV1 = z.object({
   version: z.literal(1),

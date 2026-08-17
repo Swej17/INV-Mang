@@ -1,4 +1,4 @@
-import { Decimal, assertCanonicalDecimal } from "../units/convert.js";
+import { Decimal, assertNonNegativeDecimal } from "../units/convert.js";
 import { requiredForUnits, type RecipeComponent } from "../capacity/calculate-capacity.js";
 import { comparePriority, type ProductionDemand } from "./priority.js";
 
@@ -55,9 +55,11 @@ type Pool = Map<string, InstanceType<typeof Decimal>>;
 function buildPool(request: AllocationRequest): Pool {
   const pool: Pool = new Map();
   for (const [itemId, value] of Object.entries(request.availableByItem)) {
-    let available = assertCanonicalDecimal(value);
+    let available = assertNonNegativeDecimal(value, `availableByItem[${itemId}]`);
     const held = request.protectedByItem?.[itemId];
-    if (held !== undefined) available = available.minus(assertCanonicalDecimal(held));
+    if (held !== undefined) {
+      available = available.minus(assertNonNegativeDecimal(held, `protectedByItem[${itemId}]`));
+    }
     pool.set(itemId, available.isNegative() ? new Decimal(0) : available);
   }
   return pool;
@@ -117,10 +119,20 @@ export function allocateProduction(request: AllocationRequest): AllocationResult
       (component) => component.dependencyClass === "PRODUCTION_CRITICAL",
     );
 
-    const allocated =
-      critical.length === 0
-        ? demand.requestedUnits
-        : maxAllocatable(critical, pool, request.lossEnabled, demand.requestedUnits);
+    // Match calculateCapacity rather than silently granting the whole request:
+    // a recipe whose components are all advisory would otherwise let the planner
+    // promise unlimited production from an empty pool.
+    if (critical.length === 0) {
+      throw new Error(
+        `no production-critical components: capacity is undefined for recipe ${demand.recipeVersionId}`,
+      );
+    }
+    if (!Number.isInteger(demand.requestedUnits) || demand.requestedUnits < 0) {
+      throw new Error(
+        `requestedUnits must be a non-negative integer, received ${demand.requestedUnits}`,
+      );
+    }
+    const allocated = maxAllocatable(critical, pool, request.lossEnabled, demand.requestedUnits);
 
     // Draw down the pool before considering the next demand. This sequential
     // draw is what prevents the same material being promised twice.

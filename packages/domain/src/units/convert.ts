@@ -47,6 +47,31 @@ export function assertCanonicalDecimal(value: string): InstanceType<typeof Decim
   return parsed;
 }
 
+/**
+ * Reject a value that must never be negative.
+ *
+ * `assertCanonicalDecimal` permits a leading sign because ledger DELTAS are
+ * legitimately negative — a consumption reduces on-hand. But most quantities in
+ * this system are magnitudes, and a negative one inverts the rule it feeds:
+ *
+ *   negative protected stock  -> protection INCREASES capacity
+ *   negative loss percentage  -> loss INCREASES capacity
+ *   negative available        -> the planner conjures material that never existed
+ *
+ * Each of those silently breaks an invariant the design document calls
+ * critical, so magnitudes are validated at their boundary rather than trusted.
+ */
+export function assertNonNegativeDecimal(
+  value: string,
+  label: string,
+): InstanceType<typeof Decimal> {
+  const parsed = assertCanonicalDecimal(value);
+  if (parsed.isNegative()) {
+    throw new Error(`${label} must not be negative, received ${value}`);
+  }
+  return parsed;
+}
+
 const parse = assertCanonicalDecimal;
 
 /**
