@@ -33,3 +33,13 @@ export {
   calculateCapacity,
   requiredForUnits,
 } from "./capacity/calculate-capacity.js";
+export {
+  type AllocationBlocker,
+  type AllocationLine,
+  type AllocationLineStatus,
+  type AllocationRequest,
+  type AllocationResult,
+  type ProductionDemand,
+  allocateProduction,
+  comparePriority,
+} from "./allocation/allocate-production.js";
