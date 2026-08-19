@@ -200,6 +200,23 @@ describe("JobRunner", () => {
     expect(await statusOf(id)).toBe("RUNNING");
   });
 
+  it("retry-scheduling failure is fenced: a worker that lost its lease cannot clobber the retry", async () => {
+    // Same as above but with attempts left, so fail() takes the RETRY branch
+    // (reschedule to PENDING) rather than DEAD_LETTER. That branch has its
+    // own WHERE clause and is a distinct invariant from the DEAD_LETTER one.
+    const id = await enqueue("test.fail", { maxAttempts: 5 });
+    const jobA = (await runner({}, "A").claim())!;
+    await db.sql`UPDATE jobs SET leased_until = now() - interval '1 minute' WHERE id = ${id}`;
+    expect(await runner({}, "B").reclaimExpired()).toBe(1);
+    await runner({}, "B").claim();
+    expect(await statusOf(id)).toBe("RUNNING");
+    // A does not know it lost the lease and tries to record a retryable failure anyway.
+    expect(await runner({}, "A").fail(jobA, new Error("boom"))).toBe("RETRY");
+    // B's claim must survive: the job must not flip to PENDING with a
+    // rescheduled run_after out from under B.
+    expect(await statusOf(id)).toBe("RUNNING");
+  });
+
   it("a long job's lease is renewed so reclaimExpired does not steal it", async () => {
     const id = await enqueue("test.slow");
     const ran: string[] = [];
