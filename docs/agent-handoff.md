@@ -11,9 +11,10 @@ conversation history.
 | Branch | Commit | Meaning |
 |---|---|---|
 | `main` | `4573754` | **Untouched.** Only the plans. Do not merge here without the owner's word. |
-| `phase1/integration` | `c6f806f` | All merged work lands here, fast-forward only |
+| `phase1/integration` | `23b7b42` | All merged work lands here, fast-forward only |
 
 ```
+23b7b42  fix: close three recorded ledger and traceability defects (backlog 1, 2, 4)
 c6f806f  fix: scope the ledger by organization and assess every order line
 eae2f53  feat: add authenticated command API and worker jobs          (Task 11)
 c258ea8  feat: add explainable inventory demand forecasts             (Task 10)
@@ -31,8 +32,8 @@ fd16c03  feat: calculate candle capacity from versioned recipes       (Task 5)
 c6acd5a  chore: initialize Simple Flame inventory monorepo            (Task 1, by Codex)
 ```
 
-**Test counts at `c6f806f`:** domain 214, contracts 43, application 36, api 19,
-worker 12, persistence-postgres integration 25.
+**Test counts at `23b7b42`:** domain 222, contracts 43, application 41, api 19,
+worker 12, persistence-postgres integration 42.
 
 ## How to run anything
 
@@ -96,6 +97,9 @@ Confirmed instances:
 - `lossEnabled: true` on every request while every component used `loss: NONE`.
 - A seasonal-factor test asserting `manualDemandUnits` (untouched by the
   mutation) but never the total.
+- Countable-item stock fixed at a whole number, so rounding it down changed
+  nothing — the rule only becomes visible against fractional stock, and only in
+  the reported shortfall rather than in the unit count.
 - The API push handler passing an **empty entry list** — 14 tests green while
   nothing was ever written to the ledger.
 
@@ -118,36 +122,39 @@ Then 13 (offline outbox), 14 (the whole PWA UI), 15 (Sheets), 16 (alerts),
 
 ## Open backlog
 
-Every item is recorded rather than silently carried.
+Every item is recorded rather than silently carried. Items 1, 2 and 4 of the
+original list were closed in `23b7b42`; the rest keep their meaning, renumbered.
 
-1. **`markOrdered` posts `SYNCHRONIZATION_CORRECTION` for a purchase.** That
-   cause means "reconciled against the authoritative server", so every purchase
-   looks like a sync repair and a genuine repair becomes indistinguishable.
-   Needs a `PURCHASE_ORDERED` member in `LEDGER_CAUSES` (the zod enum derives
-   from it automatically) plus an `ALTER TABLE ... DROP CONSTRAINT ... ADD
-   CONSTRAINT` migration — the CHECK is inline in a `CREATE TABLE IF NOT EXISTS`,
-   so re-running `0001` will not update it.
-2. **`RecipeComponent.countable` is read nowhere.** Zero non-test reads. Either
-   enforce it (ceil required quantities, floor availability, reject a
-   non-integer `perUnitBase`) or delete the field — right now it reads as a
-   guarantee and is not one.
-3. **Migrations 0002/0003/0004 have no repository.** Sixteen tables, no reader or
-   writer, so their constraints are exercised only by the migration running.
-   `recipe_components` also cannot represent `dependencyClass` or `countable`,
-   which both the capacity engine and batch completion filter on.
-4. **`production_batch_lots` is weaker than the ledger it traces.** No
-   append-only trigger, and `ON DELETE CASCADE` from `production_batches` means
-   one delete erases every lot linkage while the consumption entries survive.
-   `inventory_lots` is freely mutable too.
-5. **`0005_orders_packing.sql` was never written.** Task 8 shipped domain only.
+1. **Migrations 0002/0003/0004 still have no repository.** Sixteen tables with
+   no reader or writer. `production_batch_lots` and `inventory_lots` now at
+   least have integration coverage via their protection triggers, but nothing
+   in the application writes them. `recipe_components` also cannot represent
+   `dependencyClass` or `countable` — and `countable` is now load-bearing on
+   both consumption and shortfall reporting, so a recipe loaded from this table
+   would silently lose a rule the domain enforces.
+2. **`0005_orders_packing.sql` was never written.** Task 8 shipped domain only.
    `0004` is vendors/purchasing (renumbered; the gap is safe because
    orders/packing depends only on `0002`).
-6. **Drizzle schema modules** were specified in Tasks 4 and 5 and never written.
+3. **Drizzle schema modules** were specified in Tasks 4 and 5 and never written.
    Raw SQL migrations plus `postgres.js` are used instead.
-7. **Scaffold portability**: root `typecheck`/`build` call bare `pnpm -r`.
-8. **`SKIP LOCKED` is not proven load-bearing** in the job runner — plain
+4. **There is no migration runner.** Migrations are applied only by hand, inside
+   individual test files, each listing the subset it happens to need. Nothing
+   records which migrations a database has had applied. This was tolerable while
+   every migration was a `CREATE TABLE IF NOT EXISTS`; with `0007` and `0008` it
+   is not, because both are `ALTER`s that must run once, in order, against an
+   already-migrated database. Needed before anything deploys.
+5. **Scaffold portability**: root `typecheck`/`build` call bare `pnpm -r`.
+   Separately, `packages/persistence-contracts` is types-only and its `vitest
+   run` exits 1 with "No test files found", which halts `pnpm -r test` before
+   `application`, `api` or `worker` run. Pre-existing, not caused by the backlog
+   work, but it means the repo has no single command that runs every test.
+6. **`SKIP LOCKED` is not proven load-bearing** in the job runner — plain
    `FOR UPDATE` also yields one winner. The difference is throughput, and
    proving it needs a contention benchmark. Recorded in the test itself.
+7. **`IF EXISTS` on 0007's constraint drop never fires.** Mutation-tested and it
+   survives: the constraint always exists when 0007 runs. Kept as protection for
+   a database where an operator dropped it by hand, which no test can stage.
+   Recorded in the test rather than left to look like coverage.
 
 ## Conventions worth keeping
 
