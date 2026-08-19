@@ -65,3 +65,11 @@ export {
   type VendorOffer,
   recommendPurchase,
 } from "./purchasing/recommend.js";
+export {
+  type DemandWindow,
+  type ForecastHistory,
+  type ForecastOverride,
+  type ForecastResult,
+  type ManualDemandEvent,
+  calculateForecast,
+} from "./forecast/calculate-forecast.js";
