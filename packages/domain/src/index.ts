@@ -14,6 +14,7 @@ export {
   assertNonNegativeDecimal,
 } from "./units/convert.js";
 export { addQuantity, compareQuantity } from "./units/quantity.js";
+export { parseInstant } from "./time/parse-instant.js";
 export {
   type DependencyClass,
   type InventoryItem,

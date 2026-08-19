@@ -106,6 +106,15 @@ describe("calculateForecast", () => {
         calculateForecast(historyFixture(), 30, [{ ...market, units: -10 }]),
       ).toThrow("must not be negative");
     });
+
+    it("a manual event with an unparseable date is an error, never silently dropped", () => {
+      // An unparseable occursAt used to fail the range comparison silently and
+      // drop the event, understating demand for exactly the record that most
+      // needed a human to look at it.
+      expect(() =>
+        calculateForecast(historyFixture(), 30, [{ ...market, occursAt: "garbage" }]),
+      ).toThrow(/instant/);
+    });
   });
 
   describe("seasonality", () => {
@@ -195,6 +204,18 @@ describe("calculateForecast", () => {
         }),
       ).toThrow("reason");
     });
+
+    it("an override with an unparseable expiry is an error, never silently expired", () => {
+      // An unparseable expiresAt used to fail the ">" comparison silently and
+      // deactivate the override, discarding a deliberate owner decision.
+      expect(() =>
+        calculateForecast(historyFixture(), 30, [], {
+          units: "200",
+          reason: "wholesale commitment not yet in orders",
+          expiresAt: "garbage",
+        }),
+      ).toThrow(/instant/);
+    });
   });
 
   it("reports every input so the forecast can be audited", () => {
@@ -223,5 +244,9 @@ describe("calculateForecast", () => {
     expect(() =>
       calculateForecast(historyFixture({ recent30: { units: "10", coveredDays: 0 } }), 30),
     ).toThrow("coveredDays");
+  });
+
+  it("refuses an unparseable history.asOf rather than misreading every date derived from it", () => {
+    expect(() => calculateForecast(historyFixture({ asOf: "garbage" }), 30)).toThrow(/instant/);
   });
 });

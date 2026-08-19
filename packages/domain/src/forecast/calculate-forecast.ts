@@ -1,4 +1,5 @@
 import { Decimal, assertNonNegativeDecimal } from "../units/convert.js";
+import { parseInstant } from "../time/parse-instant.js";
 
 /**
  * How much of a finished good will be needed over a horizon.
@@ -107,10 +108,15 @@ export function calculateForecast(
     dailyVelocity = dailyVelocity.plus(share.times(entry.value));
   }
 
+  // Parsed once and reused below: every date derived from this forecast is
+  // relative to asOf, so one bad value must not let some derived comparisons
+  // fail loud and others fail silent depending on which Date.parse call sees it.
+  const asOfMs = parseInstant(history.asOf, "history.asOf");
+
   // Seasonality only once there is a full year to derive it from, and clamped,
   // because a sparse history produces indices that swing wildly and would turn
   // one good month into a standing order.
-  const month = new Date(history.asOf).getUTCMonth();
+  const month = new Date(asOfMs).getUTCMonth();
   const rawIndex = history.seasonalIndexByMonth[month];
   let seasonalFactor = new Decimal(1);
   if (history.monthsOfUsableHistory >= MONTHS_BEFORE_SEASONALITY && rawIndex !== undefined) {
@@ -126,11 +132,11 @@ export function calculateForecast(
   // Manual events are commitments, not estimates: they are NOT scaled by the
   // seasonal factor, and they are reported separately so an owner can see which
   // part of the number is a booking and which part is a guess.
-  const horizonEnd = Date.parse(history.asOf) + horizonDays * 86_400_000;
+  const horizonEnd = asOfMs + horizonDays * 86_400_000;
   const counted = manualEvents.filter((event) => {
     if (event.units < 0) throw new Error(`manual event units must not be negative: ${event.units}`);
-    const at = Date.parse(event.occursAt);
-    return at >= Date.parse(history.asOf) && at <= horizonEnd;
+    const at = parseInstant(event.occursAt, `manual event ${event.eventId} occursAt`);
+    return at >= asOfMs && at <= horizonEnd;
   });
   const manualDemand = counted.reduce(
     (total, event) => total.plus(new Decimal(event.units)),
@@ -145,7 +151,7 @@ export function calculateForecast(
       throw new Error("a forecast override requires a written reason");
     }
     assertNonNegativeDecimal(override.units, "override.units");
-    if (Date.parse(override.expiresAt) > Date.parse(history.asOf)) liveOverride = override;
+    if (parseInstant(override.expiresAt, "override.expiresAt") > asOfMs) liveOverride = override;
   }
 
   return {

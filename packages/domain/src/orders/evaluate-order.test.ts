@@ -237,4 +237,20 @@ describe("evaluateOrder", () => {
     const result = evaluateOrder(orderFixture({ ordered: 0, finished: 0 }));
     expect(result.productionStatus).toBe("READY_FROM_FINISHED");
   });
+
+  describe("unparseable instants", () => {
+    it("an unparseable sync timestamp is an error, never silently fresh", () => {
+      // NaN comparisons all answer false, so `NaN > threshold` used to report
+      // stale: false -- bad data looking fresher than any real timestamp.
+      const base = orderFixture({ ordered: 2, finished: 2 });
+      expect(() =>
+        evaluateOrder({ ...base, lastAuthoritativeSyncAt: "not-a-date" }),
+      ).toThrow(/instant/);
+    });
+
+    it("an unparseable assessedAt is an error, never silently fresh", () => {
+      const base = orderFixture({ ordered: 2, finished: 2 });
+      expect(() => evaluateOrder({ ...base, assessedAt: "garbage" })).toThrow(/instant/);
+    });
+  });
 });

@@ -289,6 +289,91 @@ describe("CompleteProductionBatch", () => {
         ),
       ).rejects.toThrow("recipe requires");
     });
+
+    describe("draw validation", () => {
+      const LOT_A = "lot-a";
+      const LOT_B = "lot-b";
+
+      function draw(lotId: string, quantity: string) {
+        return { lotId, quantity };
+      }
+
+      beforeEach(() => {
+        // A component whose required quantity is a plain "5": keeps each
+        // test's arithmetic about the draws under test, not unit conversion.
+        recipe = {
+          ...recipe,
+          components: [
+            {
+              itemId: WAX,
+              perUnitBase: "5",
+              dependencyClass: "PRODUCTION_CRITICAL",
+              loss: { mode: "NONE" },
+              countable: false,
+            },
+          ],
+        };
+      });
+
+      function run(overrides: Partial<Parameters<CompleteProductionBatch["execute"]>[0]> = {}) {
+        return useCase().execute(input({ finishedUnits: 1, ...overrides }));
+      }
+
+      it("a negative draw cannot hide inside a correct total", async () => {
+        // required 5; draws +7 and -2 total 5 exactly. Both lots have plenty
+        // of remaining stock and neither lotId repeats, so only the negative
+        // check can be what catches this.
+        lots = {
+          ...lots,
+          [WAX]: [
+            { lotId: LOT_A, receivedDate: "2026-08-01", bestByDate: null, remaining: "100" },
+            { lotId: LOT_B, receivedDate: "2026-08-01", bestByDate: null, remaining: "100" },
+          ],
+        };
+        await expect(
+          run({ lotOverrides: { [WAX]: [draw(LOT_A, "7"), draw(LOT_B, "-2")] } }),
+        ).rejects.toThrow(/negative/);
+      });
+
+      it("refuses a zero-quantity draw", async () => {
+        // Zero is not negative, so assertNonNegativeDecimal alone would accept
+        // it; a draw that takes nothing is still not a valid traceability record.
+        lots = {
+          ...lots,
+          [WAX]: [{ lotId: LOT_A, receivedDate: "2026-08-01", bestByDate: null, remaining: "100" }],
+        };
+        await expect(
+          run({ lotOverrides: { [WAX]: [draw(LOT_A, "0"), draw(LOT_B, "5")] } }),
+        ).rejects.toThrow(/zero/);
+      });
+
+      it("the same lot cannot be drawn twice in one override", async () => {
+        // 3 + 2 totals the required 5 exactly, and both draws individually fit
+        // within the lot's remaining stock, so only the duplicate check can be
+        // what catches this.
+        lots = {
+          ...lots,
+          [WAX]: [{ lotId: LOT_A, receivedDate: "2026-08-01", bestByDate: null, remaining: "100" }],
+        };
+        await expect(
+          run({ lotOverrides: { [WAX]: [draw(LOT_A, "3"), draw(LOT_A, "2")] } }),
+        ).rejects.toThrow(/duplicate/);
+      });
+
+      it("a draw cannot exceed the lot's remaining quantity", async () => {
+        // LOT_A has 4 remaining; draw 5 from it. The draw is positive, the
+        // total still matches what the recipe requires, and the lot is not
+        // named twice, so only the remaining-quantity check can be what
+        // catches this.
+        lots = {
+          ...lots,
+          [WAX]: [{ lotId: LOT_A, receivedDate: "2026-08-01", bestByDate: null, remaining: "4" }],
+        };
+        await expect(run({ lotOverrides: { [WAX]: [draw(LOT_A, "5")] } })).rejects.toThrow(
+          /exceeds/,
+        );
+      });
+    });
   });
 
   it("uses the caller's commandId so a retry is idempotent", async () => {

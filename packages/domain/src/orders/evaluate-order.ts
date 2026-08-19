@@ -5,6 +5,7 @@ import {
   type RecipeComponent,
 } from "../capacity/calculate-capacity.js";
 import type { DependencyClass } from "../inventory/types.js";
+import { parseInstant } from "../time/parse-instant.js";
 
 /**
  * Can this order be fulfilled, and if not, what exactly is missing?
@@ -83,7 +84,13 @@ export type OrderEvaluationResult = Readonly<{
 }>;
 
 function minutesBetween(laterIso: string, earlierIso: string): number {
-  return (Date.parse(laterIso) - Date.parse(earlierIso)) / 60_000;
+  // Both operands go through parseInstant: a NaN on either side would make
+  // this comparison answer false no matter the threshold, which is the one
+  // direction a staleness flag must never fail (see parseInstant).
+  return (
+    (parseInstant(laterIso, "assessedAt") - parseInstant(earlierIso, "lastAuthoritativeSyncAt")) /
+    60_000
+  );
 }
 
 function shortage(

@@ -1,4 +1,5 @@
 import {
+  assertNonNegativeDecimal,
   requiredForUnits,
   selectFifoLots,
   totalDrawn,
@@ -119,6 +120,44 @@ export class CompleteProductionBatch {
       const override = input.lotOverrides?.[component.itemId];
       let draws: readonly LotDraw[];
       if (override !== undefined) {
+        // Fetched once: the same call backs both the remaining-quantity check
+        // below and the known-lot check that follows it.
+        const available = await this.deps.lots.listAvailable(component.itemId, input.locationId);
+        const remainingByLot = new Map(
+          available.map((lot) => [
+            lot.lotId,
+            assertNonNegativeDecimal(lot.remaining, `${lot.lotId} remaining`),
+          ]),
+        );
+
+        // A correct TOTAL proves nothing about the individual draws: +7 and -2
+        // sum to a valid 5, the same lot listed twice sums its own quantity
+        // twice, and a draw within the total can still ask for more than a
+        // lot has. Each draw is checked before anything is summed.
+        const seenLots = new Set<string>();
+        for (const draw of override) {
+          const quantity = assertNonNegativeDecimal(
+            draw.quantity,
+            `lot override draw for ${draw.lotId}`,
+          );
+          if (quantity.isZero()) {
+            throw new Error(`lot override draw for ${draw.lotId} must be greater than zero`);
+          }
+          if (seenLots.has(draw.lotId)) {
+            throw new Error(
+              `lot override for ${component.itemId} names duplicate lot ${draw.lotId}`,
+            );
+          }
+          seenLots.add(draw.lotId);
+
+          const remaining = remainingByLot.get(draw.lotId);
+          if (remaining !== undefined && quantity.greaterThan(remaining)) {
+            throw new Error(
+              `lot override draw of ${draw.quantity} from lot ${draw.lotId} exceeds its remaining quantity of ${remaining.toFixed()}`,
+            );
+          }
+        }
+
         // An override may choose different lots but not a different amount:
         // consuming less than the recipe requires would inflate yield.
         const drawn = totalDrawn(override);
@@ -130,12 +169,9 @@ export class CompleteProductionBatch {
         // The total was validated but the lots were not: an override could name
         // a lot that does not exist and still be accepted, which is a
         // traceability record pointing at nothing.
-        const known = new Set(
-          (await this.deps.lots.listAvailable(component.itemId, input.locationId)).map(
-            (lot) => lot.lotId,
-          ),
-        );
-        const unknown = override.filter((draw) => !known.has(draw.lotId)).map((d) => d.lotId);
+        const unknown = override
+          .filter((draw) => !remainingByLot.has(draw.lotId))
+          .map((d) => d.lotId);
         if (unknown.length > 0) {
           throw new Error(
             `lot override for ${component.itemId} names unknown lot(s): ${unknown.join(", ")}`,
