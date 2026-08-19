@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+import {
+  CommandIdCollisionError,
+  type AppendResult,
+} from "@simple-flame/persistence-contracts";
 import postgres from "postgres";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -227,6 +231,103 @@ describe("the advisory lock is load-bearing", () => {
       await db.sql.unsafe("DROP TRIGGER IF EXISTS test_stall ON inventory_ledger_entries");
     }
   }, 60_000);
+});
+
+describe("a command id whose insert loses the primary-key race", () => {
+  /**
+   * Reaches the 23505 branch deterministically instead of hoping for a race.
+   *
+   * The replay lookup runs BEFORE the advisory lock, so holding that lock on a
+   * separate connection parks appendOnce in exactly the window where its lookup
+   * has already come back empty. Committing the competing processed_commands
+   * row underneath it then guarantees the insert conflicts. Waiting on pg_locks
+   * for the ungranted request, rather than sleeping, is what makes that ordering
+   * a fact — remove it and the test can commit the row too early and take the
+   * replay path instead, proving nothing.
+   */
+  const SCOPE = `${ORG}:${ITEM}:${LOCATION}`;
+
+  async function waitUntilParkedOnTheLock(): Promise<void> {
+    for (let attempt = 0; attempt < 500; attempt += 1) {
+      const [row] = await db.sql`
+        SELECT count(*)::int AS waiting FROM pg_locks
+        WHERE locktype = 'advisory' AND NOT granted
+          AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+      `;
+      if ((row!["waiting"] as number) > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error("appendOnce never blocked on the advisory lock");
+  }
+
+  /** Run one append that is guaranteed to lose the race for `commandId`. */
+  async function appendLosingTheRaceTo(
+    commandId: string,
+    winningOrganizationId: string,
+  ): Promise<AppendResult> {
+    const blocker = postgres(db.connectionUri, { max: 1, onnotice: () => {} });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let acquired!: () => void;
+    const lockHeld = new Promise<void>((resolve) => {
+      acquired = resolve;
+    });
+
+    const blocking = blocker.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${SCOPE}, 0))`;
+      acquired();
+      await held;
+    });
+
+    try {
+      await lockHeld;
+      const parked = repo().appendOnce(commandId, ORG, [receipt("10")]);
+      await waitUntilParkedOnTheLock();
+
+      // The winner commits while the caller is parked, so the caller's own
+      // insert cannot have seen it and must raise unique_violation.
+      await db.sql`
+        INSERT INTO processed_commands (command_id, organization_id, result_json)
+        VALUES (${commandId}, ${winningOrganizationId}, ${db.sql.json({
+          revision: "99",
+          duplicate: false,
+          entries: [],
+        } as never)})
+      `;
+      release();
+      await blocking;
+      return await parked;
+    } finally {
+      release();
+      await blocking.catch(() => {});
+      await blocker.end({ timeout: 5 });
+    }
+  }
+
+  it("replays the winner's result when the same organization won", async () => {
+    // A retry that overtakes its own in-flight original. Exactly-once means it
+    // gets the ORIGINAL result back, not a constraint error.
+    const result = await appendLosingTheRaceTo("0199a1f0-0000-7000-8000-000000000901", ORG);
+
+    expect(result.duplicate).toBe(true);
+    // The stored revision, not a freshly minted one: this is the winner's
+    // result verbatim rather than a recomputed answer.
+    expect(result.revision).toBe("99");
+    expect(result.entries).toHaveLength(0);
+    // The losing attempt posted nothing.
+    expect(await repo().listEntries(ORG, ITEM)).toHaveLength(0);
+  }, 30_000);
+
+  it("still fails loudly when another organization won", async () => {
+    await expect(
+      appendLosingTheRaceTo("0199a1f0-0000-7000-8000-000000000902", ORG_B),
+    ).rejects.toThrow(CommandIdCollisionError);
+
+    // No leak of the other organization's result, and nothing written here.
+    expect(await repo().listEntries(ORG, ITEM)).toHaveLength(0);
+  }, 30_000);
 });
 
 describe("organization isolation", () => {
