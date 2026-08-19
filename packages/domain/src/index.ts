@@ -7,7 +7,12 @@ export {
   baseUnitOf,
   dimensionOf,
 } from "./units/types.js";
-export { convertQuantity, CANONICAL_DECIMAL, assertCanonicalDecimal } from "./units/convert.js";
+export {
+  convertQuantity,
+  CANONICAL_DECIMAL,
+  assertCanonicalDecimal,
+  assertNonNegativeDecimal,
+} from "./units/convert.js";
 export { addQuantity, compareQuantity } from "./units/quantity.js";
 export {
   type DependencyClass,
@@ -54,3 +59,9 @@ export {
   type ProductionReadiness,
   evaluateOrder,
 } from "./orders/evaluate-order.js";
+export {
+  type PurchaseRecommendation,
+  type ReorderPolicy,
+  type VendorOffer,
+  recommendPurchase,
+} from "./purchasing/recommend.js";

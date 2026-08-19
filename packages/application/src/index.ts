@@ -8,3 +8,9 @@ export {
   type RecipeRepository,
   type RecipeVersionSnapshot,
 } from "./production/complete-batch.js";
+export {
+  PurchaseLifecycle,
+  type MarkOrderedInput,
+  type PurchaseLifecycleDeps,
+  type ReceivePurchaseInput,
+} from "./purchasing/purchase-lifecycle.js";
