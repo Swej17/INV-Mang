@@ -40,7 +40,9 @@ export class PostgresInventoryLedgerRepository implements InventoryLedgerReposit
 
       // Serialise per item/location. advisory locks rather than SELECT FOR
       // UPDATE because the first command for an item has no row to lock yet.
-      const scopes = [...new Set(entries.map((e) => `${e.itemId}:${e.locationId}`))].sort();
+      const scopes = [
+        ...new Set(entries.map((e) => `${organizationId}:${e.itemId}:${e.locationId}`)),
+      ].sort();
       for (const scope of scopes) {
         await tx`SELECT pg_advisory_xact_lock(hashtextextended(${scope}, 0))`;
       }
@@ -68,7 +70,7 @@ export class PostgresInventoryLedgerRepository implements InventoryLedgerReposit
       // Validate the resulting state BEFORE writing anything. Postgres would
       // roll the transaction back anyway, but a typed error is more useful to
       // the sync layer than a constraint violation.
-      await this.assertResultingStateIsValid(tx, entries, records);
+      await this.assertResultingStateIsValid(tx, organizationId, entries, records);
 
       const result: AppendResult = { revision, duplicate: false, entries: records };
 
@@ -99,13 +101,14 @@ export class PostgresInventoryLedgerRepository implements InventoryLedgerReposit
   /** Reject any command that would drive committed stock invalid. */
   private async assertResultingStateIsValid(
     tx: Sql,
+    organizationId: string,
     drafts: readonly LedgerEntryDraft[],
     records: readonly LedgerEntryRecord[],
   ): Promise<void> {
     const scopes = [...new Set(drafts.map((e) => `${e.itemId}|${e.locationId}`))];
     for (const scope of scopes) {
       const [itemId, locationId] = scope.split("|") as [string, string];
-      const current = await this.readEntries(tx, itemId);
+      const current = await this.readEntries(tx, organizationId, itemId);
       const scoped = records.filter((r) => r.itemId === itemId && r.locationId === locationId);
       const combined: LedgerEntryInput[] = [
         ...current.filter((e) => e.locationId === locationId),
@@ -144,13 +147,17 @@ export class PostgresInventoryLedgerRepository implements InventoryLedgerReposit
     }
   }
 
-  private async readEntries(tx: Sql, itemId: string): Promise<LedgerEntryRecord[]> {
+  private async readEntries(
+    tx: Sql,
+    organizationId: string,
+    itemId: string,
+  ): Promise<LedgerEntryRecord[]> {
     const rows = await tx`
       SELECT id, organization_id, location_id, item_id, command_id, cause,
              on_hand_delta::text, reserved_delta::text, incoming_delta::text,
              occurred_at, revision::text, compensates_event_id, metadata
       FROM inventory_ledger_entries
-      WHERE item_id = ${itemId}
+      WHERE organization_id = ${organizationId} AND item_id = ${itemId}
       ORDER BY revision ASC, id ASC
     `;
     return rows.map((row) => this.toRecord(row));
@@ -174,8 +181,12 @@ export class PostgresInventoryLedgerRepository implements InventoryLedgerReposit
     };
   }
 
-  async getProjection(itemId: string, locationId: string): Promise<ProjectionRecord> {
-    const entries = await this.readEntries(this.sql, itemId);
+  async getProjection(
+    organizationId: string,
+    itemId: string,
+    locationId: string,
+  ): Promise<ProjectionRecord> {
+    const entries = await this.readEntries(this.sql, organizationId, itemId);
     const projected = projectInventory(
       entries
         .filter((e) => e.locationId === locationId)
@@ -202,8 +213,11 @@ export class PostgresInventoryLedgerRepository implements InventoryLedgerReposit
     };
   }
 
-  async listEntries(itemId: string): Promise<readonly LedgerEntryRecord[]> {
-    return this.readEntries(this.sql, itemId);
+  async listEntries(
+    organizationId: string,
+    itemId: string,
+  ): Promise<readonly LedgerEntryRecord[]> {
+    return this.readEntries(this.sql, organizationId, itemId);
   }
 }
 

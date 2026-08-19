@@ -86,7 +86,7 @@ describe("quantities are stored as exact numeric, not floating point", () => {
         [receipt("0.1")],
       );
     }
-    expect((await repo().getProjection(ITEM, LOCATION)).onHand).toBe("1");
+    expect((await repo().getProjection(ORG, ITEM, LOCATION)).onHand).toBe("1");
   });
 });
 
@@ -152,7 +152,7 @@ describe("write-path invariants", () => {
     await expect(
       repo().appendOnce("0199a1f0-0000-7000-8000-000000000502", ORG, [receipt("-40")]),
     ).rejects.toThrow();
-    expect((await repo().getProjection(ITEM, LOCATION)).onHand).toBe("10");
+    expect((await repo().getProjection(ORG, ITEM, LOCATION)).onHand).toBe("10");
   });
 
   it("keeps locations separate for one item", async () => {
@@ -161,8 +161,8 @@ describe("write-path invariants", () => {
       receipt("100", LOCATION),
       receipt("7", LOCATION_B),
     ]);
-    expect((await repo().getProjection(ITEM, LOCATION)).onHand).toBe("100");
-    expect((await repo().getProjection(ITEM, LOCATION_B)).onHand).toBe("7");
+    expect((await repo().getProjection(ORG, ITEM, LOCATION)).onHand).toBe("100");
+    expect((await repo().getProjection(ORG, ITEM, LOCATION_B)).onHand).toBe("7");
   });
 });
 
@@ -218,7 +218,7 @@ describe("the advisory lock is load-bearing", () => {
       ]);
 
       expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-      expect((await repo().getProjection(ITEM, LOCATION)).reserved).toBe("8");
+      expect((await repo().getProjection(ORG, ITEM, LOCATION)).reserved).toBe("8");
     } finally {
       await a.end({ timeout: 5 });
       await b.end({ timeout: 5 });
@@ -228,15 +228,33 @@ describe("the advisory lock is load-bearing", () => {
 });
 
 describe("organization isolation", () => {
-  it("does not let one organization see another's stock", async () => {
-    // KNOWN GAP, asserted so it cannot be forgotten: the adapter reads by
-    // item_id without organization_id, so two organizations holding the same
-    // item id share a projection. Threading organizationId through the port is
-    // the fix; this test documents the current behaviour and will need updating
-    // when that lands.
+  it("shows each organization only its own stock", async () => {
     await repo().appendOnce("0199a1f0-0000-7000-8000-000000000801", ORG, [receipt("100")]);
     await repo().appendOnce("0199a1f0-0000-7000-8000-000000000802", ORG_B, [receipt("500")]);
-    const projection = await repo().getProjection(ITEM, LOCATION);
-    expect(projection.onHand).toBe("600");
+    expect((await repo().getProjection(ORG, ITEM, LOCATION)).onHand).toBe("100");
+    expect((await repo().getProjection(ORG_B, ITEM, LOCATION)).onHand).toBe("500");
+  });
+
+  it("does not let one organization consume another's stock", async () => {
+    // Previously: org A held 100, org B held 900, and org A was permitted to
+    // consume 500 — landing at -400 — because both negative-stock guards read
+    // the COMBINED history. "Available inventory cannot be negative" was
+    // defeated by the mere presence of a second organization.
+    await repo().appendOnce("0199a1f0-0000-7000-8000-000000000811", ORG, [receipt("100")]);
+    await repo().appendOnce("0199a1f0-0000-7000-8000-000000000812", ORG_B, [receipt("900")]);
+
+    await expect(
+      repo().appendOnce("0199a1f0-0000-7000-8000-000000000813", ORG, [receipt("-500")]),
+    ).rejects.toThrow();
+
+    expect((await repo().getProjection(ORG, ITEM, LOCATION)).onHand).toBe("100");
+    expect((await repo().getProjection(ORG_B, ITEM, LOCATION)).onHand).toBe("900");
+  });
+
+  it("keeps each organization's history separate", async () => {
+    await repo().appendOnce("0199a1f0-0000-7000-8000-000000000821", ORG, [receipt("100")]);
+    await repo().appendOnce("0199a1f0-0000-7000-8000-000000000822", ORG_B, [receipt("900")]);
+    expect(await repo().listEntries(ORG, ITEM)).toHaveLength(1);
+    expect(await repo().listEntries(ORG_B, ITEM)).toHaveLength(1);
   });
 });

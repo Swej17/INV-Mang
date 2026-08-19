@@ -35,19 +35,23 @@ describe("selectFifoLots", () => {
 
   it("prefers an earlier best-by date when received dates tie", () => {
     // Same delivery, different shelf life: use the one that expires first.
+    // The earlier best-by is on the HIGHER lot id, so the id tiebreak alone
+    // would give the opposite answer — otherwise this passed even with the
+    // best-by comparison deleted.
     const lots = [
-      lot({ lotId: NEWER, receivedDate: "2026-08-01", bestByDate: "2027-01-01" }),
-      lot({ lotId: OLDER, receivedDate: "2026-08-01", bestByDate: "2026-10-01" }),
+      lot({ lotId: OLDER, receivedDate: "2026-08-01", bestByDate: "2027-01-01" }),
+      lot({ lotId: NEWEST, receivedDate: "2026-08-01", bestByDate: "2026-10-01" }),
     ];
-    expect(selectFifoLots(lots, "5").map((x) => x.lotId)).toEqual([OLDER]);
+    expect(selectFifoLots(lots, "5").map((x) => x.lotId)).toEqual([NEWEST]);
   });
 
   it("treats a lot with no best-by date as last among equal receipts", () => {
+    // Dated lot on the HIGHER id, so id ordering cannot produce this result.
     const lots = [
-      lot({ lotId: NEWER, receivedDate: "2026-08-01", bestByDate: null }),
-      lot({ lotId: OLDER, receivedDate: "2026-08-01", bestByDate: "2026-12-01" }),
+      lot({ lotId: OLDER, receivedDate: "2026-08-01", bestByDate: null }),
+      lot({ lotId: NEWEST, receivedDate: "2026-08-01", bestByDate: "2026-12-01" }),
     ];
-    expect(selectFifoLots(lots, "5").map((x) => x.lotId)).toEqual([OLDER]);
+    expect(selectFifoLots(lots, "5").map((x) => x.lotId)).toEqual([NEWEST]);
   });
 
   it("falls back to lot id so selection is reproducible", () => {
@@ -99,6 +103,12 @@ describe("selectFifoLots", () => {
     const picks = selectFifoLots(lots, "10");
     expect(picks).toHaveLength(1);
     expect(picks[0]!.quantity).toBe("10");
+  });
+
+  it("rejects a negative requirement", () => {
+    // Consuming a negative amount is nonsense; the guard existed but nothing
+    // ever passed one, so deleting it broke no test.
+    expect(() => selectFifoLots([lot({ lotId: OLDER })], "-5")).toThrow("cannot consume a negative");
   });
 
   it("rejects a non-canonical requirement", () => {

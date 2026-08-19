@@ -95,7 +95,11 @@ function chooseOffer(offers: readonly VendorOffer[]): VendorOffer {
   const preferred = offers.filter((offer) => offer.preferred);
   const pool = preferred.length > 0 ? preferred : offers;
   return [...pool].sort((a, b) => {
-    const byPrice = new Decimal(a.unitPrice).comparedTo(new Decimal(b.unitPrice));
+    // Prices validate like quantities: decimal.js would silently read "1e3" as
+    // 1000, and this value is money the owner spends against.
+    const byPrice = assertNonNegativeDecimal(a.unitPrice, "unitPrice").comparedTo(
+      assertNonNegativeDecimal(b.unitPrice, "unitPrice"),
+    );
     if (byPrice !== null && byPrice !== 0) return byPrice;
     return a.vendorId.localeCompare(b.vendorId);
   })[0]!;
@@ -124,7 +128,11 @@ export function recommendPurchase(policy: ReorderPolicy): PurchaseRecommendation
   const reorderPoint = leadTimeDemand.plus(safetyDemand).plus(protectedQuantity);
 
   const targetCoverage = dailyDemand.times(policy.targetCoverageDays);
-  const rawNeed = targetCoverage.minus(available).minus(usableIncoming);
+  // Cover at least the reorder point. With targetCoverageDays below
+  // leadTime + safety the two halves disagreed, and an item that was already
+  // stocked out and past its order-by date reported shouldReorder: false.
+  const coverageTarget = targetCoverage.greaterThan(reorderPoint) ? targetCoverage : reorderPoint;
+  const rawNeed = coverageTarget.minus(available).minus(usableIncoming);
   // Never negative: "you have too much" is not an order.
   const needBase = rawNeed.isNegative() ? new Decimal(0) : rawNeed;
 
@@ -149,9 +157,11 @@ export function recommendPurchase(policy: ReorderPolicy): PurchaseRecommendation
   const belowReorderPoint = available.plus(usableIncoming).lessThan(reorderPoint);
   const shouldReorder = belowReorderPoint && recommended.greaterThan(0);
 
+  const unitPrice = assertNonNegativeDecimal(offer.unitPrice, "unitPrice");
+  const shipping = assertNonNegativeDecimal(offer.shippingEstimate, "shippingEstimate");
   const estimatedCost = recommended
-    .times(new Decimal(offer.unitPrice))
-    .plus(recommended.greaterThan(0) ? new Decimal(offer.shippingEstimate) : new Decimal(0));
+    .times(unitPrice)
+    .plus(recommended.greaterThan(0) ? shipping : new Decimal(0));
 
   return {
     itemId: policy.itemId,
@@ -180,6 +190,7 @@ export function recommendPurchase(policy: ReorderPolicy): PurchaseRecommendation
       safetyDays: policy.safetyDays,
       targetCoverageDays: policy.targetCoverageDays,
       targetCoverageDemand: targetCoverage.toFixed(),
+      effectiveCoverageTarget: coverageTarget.toFixed(),
       packConversion: packConversion.toFixed(),
     },
   };

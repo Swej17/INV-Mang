@@ -165,6 +165,36 @@ describe("CompleteProductionBatch", () => {
   it("records source lots for traceability", async () => {
     const result = await useCase().execute(input());
     expect(result.lotsByItem[WAX]!.map((d) => d.lotId)).toEqual(["lot-a"]);
+    // Quantities too: ids alone do not say how much came from where.
+    expect(result.lotsByItem[WAX]!.map((d) => d.quantity)).toEqual([oz("157")]);
+  });
+
+  it("refuses to consume a lot-controlled item with no registered lots", async () => {
+    // Previously: one gram of registered lot was correctly refused, but ZERO
+    // registered lots consumed 4.45 kg and reported success with lots: [].
+    recipe = { ...recipe, lotControlledItemIds: [WAX] };
+    lots = { ...lots, [WAX]: [] };
+    await expect(useCase().execute(input())).rejects.toThrow("cannot record traceability");
+    expect(ledger.appended).toHaveLength(0);
+  });
+
+  it("still allows an item that is not lot controlled to have no lots", async () => {
+    lots = { ...lots, [WAX]: [] };
+    await expect(useCase().execute(input())).resolves.toBeDefined();
+  });
+
+  it("posts process loss as a NEGATIVE delta", async () => {
+    // The sign was never asserted: a positive loss entry would have loss
+    // creating stock, and only an unrelated integration total caught it.
+    recipe = {
+      ...recipe,
+      components: components([{ loss: { mode: "PERCENT_PER_UNIT", percentage: "0.1" } }, {}]),
+    };
+    await useCase().execute(input());
+    const loss = ledger.appended[0]!.entries.find(
+      (e) => e.itemId === WAX && e.cause === "PROCESS_LOSS",
+    );
+    expect(loss!.onHandDelta).toBe(`-${oz("15.7")}`);
   });
 
   it("rolls back every consumption when the append fails", async () => {
@@ -213,13 +243,33 @@ describe("CompleteProductionBatch", () => {
   });
 
   describe("lot overrides", () => {
-    it("accepts an override that draws the required total", async () => {
+    it("accepts an override naming a real lot", async () => {
       const result = await useCase().execute(
-        input({
-          lotOverrides: { [WAX]: [{ lotId: "lot-manual", quantity: oz("157") }] },
-        }),
+        input({ lotOverrides: { [WAX]: [{ lotId: "lot-a", quantity: oz("157") }] } }),
       );
-      expect(result.lotsByItem[WAX]!.map((d) => d.lotId)).toEqual(["lot-manual"]);
+      expect(result.lotsByItem[WAX]!.map((d) => d.lotId)).toEqual(["lot-a"]);
+    });
+
+    it("refuses an override naming a lot that does not exist", async () => {
+      // The total was validated but the lots were not, so an override could
+      // point the traceability record at nothing.
+      await expect(
+        useCase().execute({
+          ...input(),
+          lotOverrides: { [WAX]: [{ lotId: "lot-that-never-existed", quantity: oz("157") }] },
+        }),
+      ).rejects.toThrow("unknown lot");
+      expect(ledger.appended).toHaveLength(0);
+    });
+
+    it("flags an override as a manual departure from FIFO", async () => {
+      await useCase().execute(
+        input({ lotOverrides: { [WAX]: [{ lotId: "lot-a", quantity: oz("157") }] } }),
+      );
+      const consumption = ledger.appended[0]!.entries.find(
+        (e) => e.itemId === WAX && e.cause === "PRODUCTION_CONSUMPTION",
+      );
+      expect(consumption!.metadata).toMatchObject({ manualOverride: true });
     });
 
     it("refuses an override that draws less than the recipe requires", async () => {

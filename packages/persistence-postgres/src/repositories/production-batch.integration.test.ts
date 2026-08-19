@@ -126,14 +126,14 @@ describe("production batch atomicity against real PostgreSQL", () => {
     // oz(157) = 4450.875130625 lands as 4450.87513063 and the running total is
     // 14174.7615625 - 4450.87513063. Quantising each delta is NOT the same as
     // quantising the sum, which is why this is not simply oz("343").
-    expect((await ledger.getProjection(WAX, LOCATION)).onHand).toBe("9723.88643187");
-    expect((await ledger.getProjection(VESSEL, LOCATION)).onHand).toBe("90");
-    expect((await ledger.getProjection(FINISHED, LOCATION)).onHand).toBe("10");
+    expect((await ledger.getProjection(ORG, WAX, LOCATION)).onHand).toBe("9723.88643187");
+    expect((await ledger.getProjection(ORG, VESSEL, LOCATION)).onHand).toBe("90");
+    expect((await ledger.getProjection(ORG, FINISHED, LOCATION)).onHand).toBe("10");
   });
 
   it("leaves NOTHING behind when the batch exceeds available material", async () => {
     const ledger = new PostgresInventoryLedgerRepository(database.sql);
-    const before = await ledger.getProjection(WAX, LOCATION);
+    const before = await ledger.getProjection(ORG, WAX, LOCATION);
 
     await expect(
       useCase().execute({
@@ -149,8 +149,8 @@ describe("production batch atomicity against real PostgreSQL", () => {
 
     // The critical assertion: wax must be untouched. A partial batch would have
     // consumed wax with no candles to show for it.
-    expect((await ledger.getProjection(WAX, LOCATION)).onHand).toBe(before.onHand);
-    expect((await ledger.getProjection(FINISHED, LOCATION)).onHand).toBe("0");
+    expect((await ledger.getProjection(ORG, WAX, LOCATION)).onHand).toBe(before.onHand);
+    expect((await ledger.getProjection(ORG, FINISHED, LOCATION)).onHand).toBe("0");
   });
 
   it("is idempotent: replaying a batch command posts nothing new", async () => {
@@ -171,9 +171,9 @@ describe("production batch atomicity against real PostgreSQL", () => {
     await run();
 
     // Five candles, not ten. A retried completion must not double production.
-    expect((await ledger.getProjection(FINISHED, LOCATION)).onHand).toBe("5");
+    expect((await ledger.getProjection(ORG, FINISHED, LOCATION)).onHand).toBe("5");
     // 5 candles: oz(78.5) = 2225.4375653125 stores as 2225.43756531.
-    expect((await ledger.getProjection(WAX, LOCATION)).onHand).toBe("11949.32399719");
+    expect((await ledger.getProjection(ORG, WAX, LOCATION)).onHand).toBe("11949.32399719");
   });
 
   it("records loss as a separate ledger entry", async () => {
@@ -205,13 +205,13 @@ describe("production batch atomicity against real PostgreSQL", () => {
       lossEnabled: true,
     });
 
-    const entries = await new PostgresInventoryLedgerRepository(database.sql).listEntries(WAX);
+    const entries = await new PostgresInventoryLedgerRepository(database.sql).listEntries(ORG, WAX);
     const causes = entries.map((e) => e.cause);
     expect(causes).toContain("PRODUCTION_CONSUMPTION");
     expect(causes).toContain("PROCESS_LOSS");
     // 157 oz consumed + 15.7 oz lost, from 500 oz received, each stored at
     // numeric(24,8): 14174.7615625 - 4450.87513063 - 445.08751306.
-    expect((await new PostgresInventoryLedgerRepository(database.sql).getProjection(WAX, LOCATION)).onHand)
+    expect((await new PostgresInventoryLedgerRepository(database.sql).getProjection(ORG, WAX, LOCATION)).onHand)
       .toBe("9278.79891881");
   });
 });

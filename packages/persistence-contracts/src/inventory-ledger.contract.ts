@@ -56,7 +56,7 @@ export function runInventoryLedgerContract(
         // The replay must return the ORIGINAL result, not a fresh one.
         expect(second.revision).toBe(first.revision);
 
-        const projection = await repository.getProjection(ITEM, LOCATION);
+        const projection = await repository.getProjection(ORG, ITEM, LOCATION);
         expect(projection.onHand).toBe("4535.9237");
       } finally {
         await dispose();
@@ -68,7 +68,7 @@ export function runInventoryLedgerContract(
       try {
         await reset();
         await repository.appendOnce("0199a1f0-0000-7000-8000-0000000000c2", ORG, [receipt("100")]);
-        const before = await repository.listEntries(ITEM);
+        const before = await repository.listEntries(ORG, ITEM);
         expect(before).toHaveLength(1);
 
         await repository.appendOnce("0199a1f0-0000-7000-8000-0000000000c3", ORG, [
@@ -79,12 +79,12 @@ export function runInventoryLedgerContract(
           },
         ]);
 
-        const after = await repository.listEntries(ITEM);
+        const after = await repository.listEntries(ORG, ITEM);
         expect(after).toHaveLength(2);
         // The original entry is untouched; correction is additive.
         expect(after[0]!.eventId).toBe(before[0]!.eventId);
         expect(after[0]!.onHandDelta).toBe(before[0]!.onHandDelta);
-        expect((await repository.getProjection(ITEM, LOCATION)).onHand).toBe("0");
+        expect((await repository.getProjection(ORG, ITEM, LOCATION)).onHand).toBe("0");
       } finally {
         await dispose();
       }
@@ -100,8 +100,8 @@ export function runInventoryLedgerContract(
         ).rejects.toThrow(InsufficientAvailableError);
 
         // The rejected command must leave nothing behind.
-        expect(await repository.listEntries(ITEM)).toHaveLength(1);
-        expect((await repository.getProjection(ITEM, LOCATION)).reserved).toBe("0");
+        expect(await repository.listEntries(ORG, ITEM)).toHaveLength(1);
+        expect((await repository.getProjection(ORG, ITEM, LOCATION)).reserved).toBe("0");
       } finally {
         await dispose();
       }
@@ -137,7 +137,7 @@ export function runInventoryLedgerContract(
         const fulfilled = results.filter((result) => result.status === "fulfilled");
         // More than one winner means the same stock was promised twice.
         expect(fulfilled).toHaveLength(1);
-        expect((await repository.getProjection(ITEM, LOCATION)).reserved).toBe("8");
+        expect((await repository.getProjection(ORG, ITEM, LOCATION)).reserved).toBe("8");
       } finally {
         await dispose();
       }
@@ -156,8 +156,8 @@ export function runInventoryLedgerContract(
         ).rejects.toThrow();
 
         // Atomicity: the valid first entry must not survive on its own.
-        expect(await repository.listEntries(ITEM)).toHaveLength(1);
-        expect((await repository.getProjection(ITEM, LOCATION)).onHand).toBe("10");
+        expect(await repository.listEntries(ORG, ITEM)).toHaveLength(1);
+        expect((await repository.getProjection(ORG, ITEM, LOCATION)).onHand).toBe("10");
       } finally {
         await dispose();
       }
@@ -183,7 +183,7 @@ export function runInventoryLedgerContract(
       const { repository, reset, dispose } = await createRepository();
       try {
         await reset();
-        const projection = await repository.getProjection(ITEM, LOCATION);
+        const projection = await repository.getProjection(ORG, ITEM, LOCATION);
         expect(projection).toMatchObject({ onHand: "0", reserved: "0", available: "0" });
       } finally {
         await dispose();
@@ -198,7 +198,7 @@ export function runInventoryLedgerContract(
           receipt("4535.9237"),
         ]);
         // Not 4535.923700000001, and not 4535.92.
-        expect((await repository.getProjection(ITEM, LOCATION)).onHand).toBe("4535.9237");
+        expect((await repository.getProjection(ORG, ITEM, LOCATION)).onHand).toBe("4535.9237");
       } finally {
         await dispose();
       }

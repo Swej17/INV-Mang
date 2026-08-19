@@ -1,5 +1,9 @@
-import { Decimal, assertCanonicalDecimal } from "../units/convert.js";
-import { calculateCapacity, type RecipeComponent } from "../capacity/calculate-capacity.js";
+import { Decimal, assertCanonicalDecimal, assertNonNegativeDecimal } from "../units/convert.js";
+import {
+  calculateCapacity,
+  requiredForUnits,
+  type RecipeComponent,
+} from "../capacity/calculate-capacity.js";
 import type { DependencyClass } from "../inventory/types.js";
 
 /**
@@ -86,8 +90,21 @@ function shortage(
   input: OrderEvaluationInput,
   itemId: string,
   required: InstanceType<typeof Decimal>,
+  pool?: Map<string, InstanceType<typeof Decimal>>,
 ): OrderShortage | null {
-  const available = assertCanonicalDecimal(input.availableByItem[itemId] ?? "0");
+  // Measured against USABLE stock. Reading availableByItem raw ignored
+  // protected stock, so an item with 500 g all held back was reported as
+  // having 500 available and a shortfall half its real size.
+  const available =
+    pool?.get(itemId) ??
+    (() => {
+      const raw = assertNonNegativeDecimal(input.availableByItem[itemId] ?? "0", "available");
+      const held = input.protectedByItem?.[itemId];
+      const usable = held === undefined
+        ? raw
+        : raw.minus(assertNonNegativeDecimal(held, "protectedQuantity"));
+      return usable.isNegative() ? new Decimal(0) : usable;
+    })();
   if (required.lessThanOrEqualTo(available)) return null;
   return {
     itemId,
@@ -101,38 +118,76 @@ function shortage(
 export function evaluateOrder(input: OrderEvaluationInput): OrderEvaluationResult {
   // Finished goods first. Asking the owner to produce units they already have on
   // the shelf is the single most common way this kind of system wastes a day.
+  //
+  // Whole units only: finished stock is countable, and a Number() round trip
+  // here previously produced fractional candles (2.9 allocated, 2.1 to make)
+  // which then flowed into every downstream comparison.
   let finishedAllocated = 0;
   let productionRequired = 0;
+  const perLineShortfall: { line: OrderLine; units: number }[] = [];
   for (const line of input.lines) {
-    const onHand = Number(assertCanonicalDecimal(line.finishedAvailable).toFixed());
+    if (!Number.isInteger(line.orderedUnits) || line.orderedUnits < 0) {
+      throw new Error(`orderedUnits must be a non-negative integer, received ${line.orderedUnits}`);
+    }
+    const onHand = assertNonNegativeDecimal(line.finishedAvailable, "finishedAvailable")
+      .floor()
+      .toNumber();
     const fromFinished = Math.min(line.orderedUnits, onHand);
     finishedAllocated += fromFinished;
-    productionRequired += line.orderedUnits - fromFinished;
+    const shortfallUnits = line.orderedUnits - fromFinished;
+    productionRequired += shortfallUnits;
+    if (shortfallUnits > 0) perLineShortfall.push({ line, units: shortfallUnits });
   }
 
-  // Capacity for the remaining shortfall, using only production-critical
-  // components. Shared materials across lines are approximated here by summing
-  // requirements; a committed plan goes through allocateProduction.
+  // EVERY line is assessed, against a pool that decrements as each line claims
+  // material. Evaluating only the first line reported a two-line order as
+  // MAKEABLE with zero blockers when the second line's vessel was out of stock,
+  // and named the first line's component as the blocker when it was in fact
+  // sufficient — sending the owner to buy the wrong thing.
   let makeableUnits = 0;
   const productionBlockers: OrderShortage[] = [];
-  if (productionRequired > 0) {
-    const first = input.lines.find((line) => line.orderedUnits > 0);
-    if (first) {
-      const capacity = calculateCapacity({
-        recipeVersionId: first.recipeVersionId,
-        components: first.components,
-        availableByItem: input.availableByItem,
-        ...(input.protectedByItem ? { protectedByItem: input.protectedByItem } : {}),
-        lossEnabled: input.lossEnabled,
-      });
-      makeableUnits = Math.min(capacity.adjustedUnits, productionRequired);
+  const pool = new Map<string, InstanceType<typeof Decimal>>();
+  for (const [itemId, value] of Object.entries(input.availableByItem)) {
+    let available = assertNonNegativeDecimal(value, `availableByItem[${itemId}]`);
+    const held = input.protectedByItem?.[itemId];
+    if (held !== undefined) {
+      available = available.minus(assertNonNegativeDecimal(held, `protectedByItem[${itemId}]`));
+    }
+    pool.set(itemId, available.isNegative() ? new Decimal(0) : available);
+  }
 
-      if (makeableUnits < productionRequired) {
-        for (const component of first.components) {
-          if (component.dependencyClass !== "PRODUCTION_CRITICAL") continue;
-          const required = assertCanonicalDecimal(component.perUnitBase).times(productionRequired);
-          const found = shortage(input, component.itemId, required);
-          if (found) productionBlockers.push(found);
+  for (const { line, units } of perLineShortfall) {
+    const availableForLine: Record<string, string> = {};
+    for (const [itemId, remaining] of pool) availableForLine[itemId] = remaining.toFixed();
+
+    const capacity = calculateCapacity({
+      recipeVersionId: line.recipeVersionId,
+      components: line.components,
+      availableByItem: availableForLine,
+      lossEnabled: input.lossEnabled,
+    });
+    const madeForLine = Math.min(capacity.adjustedUnits, units);
+    makeableUnits += madeForLine;
+
+    // Draw down before the next line, so two lines cannot both be promised the
+    // same wax.
+    for (const component of line.components) {
+      if (component.dependencyClass !== "PRODUCTION_CRITICAL") continue;
+      if (madeForLine <= 0) continue;
+      const used = requiredForUnits(component, BigInt(madeForLine), input.lossEnabled);
+      const remaining = pool.get(component.itemId) ?? new Decimal(0);
+      pool.set(component.itemId, remaining.minus(used));
+    }
+
+    if (madeForLine < units) {
+      for (const component of line.components) {
+        if (component.dependencyClass !== "PRODUCTION_CRITICAL") continue;
+        // requiredForUnits, not perUnitBase x units: the raw multiplication
+        // ignored the loss policy and under-reported a real shortfall by 56%.
+        const required = requiredForUnits(component, BigInt(units), input.lossEnabled);
+        const found = shortage(input, component.itemId, required, pool);
+        if (found && !productionBlockers.some((b) => b.itemId === found.itemId)) {
+          productionBlockers.push(found);
         }
       }
     }

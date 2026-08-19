@@ -69,16 +69,17 @@ describe("recommendPurchase", () => {
   it("counts protected stock toward the reorder point, not toward availability", () => {
     const withProtection = recommendPurchase(policy({ available: "200", protectedQuantity: "100" }));
     const without = recommendPurchase(policy({ available: "200", protectedQuantity: "0" }));
-    // Protection raises the trigger threshold and is unavailable to consume.
-    expect(Number(withProtection.reorderPoint)).toBeGreaterThan(Number(without.reorderPoint));
+    // Exact values, not a Number() comparison: this package exists to avoid
+    // float arithmetic and its own tests should not reintroduce it.
+    expect(without.reorderPoint).toBe("100");
+    expect(withProtection.reorderPoint).toBe("200");
   });
 
   it("subtracts usable incoming from the recommendation", () => {
     const base = recommendPurchase(policy());
     const withIncoming = recommendPurchase(policy({ usableIncoming: "100" }));
-    expect(Number(withIncoming.recommendedPurchaseUnits)).toBeLessThan(
-      Number(base.recommendedPurchaseUnits),
-    );
+    expect(base.recommendedPurchaseUnits).toBe("300");
+    expect(withIncoming.recommendedPurchaseUnits).toBe("200");
   });
 
   it("reports the expected stockout date from current cover", () => {
@@ -180,5 +181,86 @@ describe("recommendPurchase", () => {
 
   it("requires at least one vendor offer", () => {
     expect(() => recommendPurchase(policy({ offers: [] }))).toThrow("no vendor offer");
+  });
+});
+
+describe("review remediation", () => {
+  it("reorders an item that is stocked out and past its order-by date", () => {
+    // Probe P2: demand 10/day, 60 on hand, 7 day lead, 3 safety, 5 day target.
+    // The two halves used different horizons, so this returned
+    // shouldReorder: false while also reporting overdue: true and a stockout
+    // inside the lead time.
+    const result = recommendPurchase(
+      policy({
+        dailyDemand: "10",
+        available: "60",
+        targetCoverageDays: 5,
+        safetyDays: 3,
+        offers: [vendor({ leadTimeDays: 7 })],
+      }),
+    );
+    expect(result.overdue).toBe(true);
+    expect(result.shouldReorder).toBe(true);
+    expect(Number(result.recommendedPurchaseUnits)).toBeGreaterThan(0);
+  });
+
+  it.each([["1e3"], ["0xff"], ["+5"], ["not-a-number"]])(
+    "refuses the non-canonical unit price %s",
+    (unitPrice) => {
+      // decimal.js would read "1e3" as 1000 in a cost the owner spends against.
+      expect(() => recommendPurchase(policy({ offers: [vendor({ unitPrice })] }))).toThrow();
+    },
+  );
+
+  it("does not reorder while stock is above the reorder point", () => {
+    // Both halves of shouldReorder must matter. Dropping belowReorderPoint
+    // survived, because no test covered the band where stock exceeds the
+    // reorder point but still falls short of full target coverage: topping up
+    // there is optional, not a reorder trigger.
+    const result = recommendPurchase(
+      policy({
+        dailyDemand: "10",
+        available: "200",
+        safetyDays: 3,
+        targetCoverageDays: 30,
+        offers: [vendor({ leadTimeDays: 7 })],
+      }),
+    );
+    expect(result.reorderPoint).toBe("100");
+    expect(Number(result.recommendedPurchaseUnits)).toBeGreaterThan(0);
+    // Above the trigger, so no reorder is due even though a top-up is possible.
+    expect(result.shouldReorder).toBe(false);
+  });
+
+  it("refuses a negative shipping estimate", () => {
+    expect(() =>
+      recommendPurchase(policy({ offers: [vendor({ shippingEstimate: "-10" })] })),
+    ).toThrow("must not be negative");
+  });
+
+  it("rounds up to pack size independently of the reorder multiple", () => {
+    // The original test set packSize 12, multiple 12 and minimum 24 with a need
+    // of 13, so all three rules coincidentally produced 24 and mutations
+    // removing pack rounding or the minimum both survived.
+    const result = recommendPurchase(
+      policy({
+        dailyDemand: "1",
+        targetCoverageDays: 13,
+        offers: [vendor({ packSize: "5", minimumOrderQuantity: "1", reorderMultiple: "1" })],
+      }),
+    );
+    // 13 rounds to 15 on a pack of 5 — a distinct answer from 13 or 24.
+    expect(result.recommendedPurchaseUnits).toBe("15");
+  });
+
+  it("respects a minimum order quantity larger than the need", () => {
+    const result = recommendPurchase(
+      policy({
+        dailyDemand: "1",
+        targetCoverageDays: 3,
+        offers: [vendor({ packSize: "1", minimumOrderQuantity: "50", reorderMultiple: "1" })],
+      }),
+    );
+    expect(result.recommendedPurchaseUnits).toBe("50");
   });
 });

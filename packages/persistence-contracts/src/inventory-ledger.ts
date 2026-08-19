@@ -62,11 +62,22 @@ export interface InventoryLedgerRepository {
     entries: readonly LedgerEntryDraft[],
   ): Promise<AppendResult>;
 
-  /** Derived stock for one item at one location. */
-  getProjection(itemId: string, locationId: string): Promise<ProjectionRecord>;
+  /**
+   * Derived stock for one item at one location, within ONE organization.
+   *
+   * organizationId is not optional and is not inferable from the item: two
+   * organizations can legitimately hold the same item id (seeded catalogue,
+   * restore, fixture reuse), and reading across them let one tenant consume
+   * stock it did not own and drive itself negative.
+   */
+  getProjection(
+    organizationId: string,
+    itemId: string,
+    locationId: string,
+  ): Promise<ProjectionRecord>;
 
-  /** Full history for an item, oldest first. Never mutated, only appended to. */
-  listEntries(itemId: string): Promise<readonly LedgerEntryRecord[]>;
+  /** Full history for one organization's item, oldest first. Append-only. */
+  listEntries(organizationId: string, itemId: string): Promise<readonly LedgerEntryRecord[]>;
 }
 
 /** Raised when a command would drive committed stock into an invalid state. */

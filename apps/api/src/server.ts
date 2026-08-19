@@ -226,11 +226,18 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   });
 
   app.get("/v1/read/projection", { preHandler: [requireSession] }, async (request, reply) => {
+    const session = request.session!;
     const query = request.query as Record<string, string | undefined>;
     if (!query["itemId"] || !query["locationId"]) {
       return reply.code(422).send({ error: "itemId and locationId are required" });
     }
-    const projection = await ledger.getProjection(query["itemId"], query["locationId"]);
+    // Organization comes from the SESSION, never from the query string: taking
+    // it from the caller would make cross-tenant reads a matter of typing.
+    const projection = await ledger.getProjection(
+      session.organizationId,
+      query["itemId"],
+      query["locationId"],
+    );
     return reply.code(200).send(projection);
   });
 

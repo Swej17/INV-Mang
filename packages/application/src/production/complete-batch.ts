@@ -28,6 +28,14 @@ export type RecipeVersionSnapshot = Readonly<{
   finishedItemId: string;
   active: boolean;
   components: readonly RecipeComponent[];
+  /**
+   * Items whose consumption must name its source lots.
+   *
+   * Without this the "no lots registered" case consumed material silently with
+   * an empty lot list, destroying the recall record for exactly the materials
+   * that need one — while one gram of registered lot was correctly refused.
+   */
+  lotControlledItemIds?: readonly string[];
 }>;
 
 export interface RecipeRepository {
@@ -107,6 +115,7 @@ export class CompleteProductionBatch {
       const withoutLoss = requiredForUnits(component, units, false);
       const loss = withLoss.minus(withoutLoss);
 
+      const lotControlled = recipe.lotControlledItemIds?.includes(component.itemId) ?? false;
       const override = input.lotOverrides?.[component.itemId];
       let draws: readonly LotDraw[];
       if (override !== undefined) {
@@ -118,10 +127,35 @@ export class CompleteProductionBatch {
             `lot override for ${component.itemId} draws ${drawn}, recipe requires ${withLoss.toFixed()}`,
           );
         }
+        // The total was validated but the lots were not: an override could name
+        // a lot that does not exist and still be accepted, which is a
+        // traceability record pointing at nothing.
+        const known = new Set(
+          (await this.deps.lots.listAvailable(component.itemId, input.locationId)).map(
+            (lot) => lot.lotId,
+          ),
+        );
+        const unknown = override.filter((draw) => !known.has(draw.lotId)).map((d) => d.lotId);
+        if (unknown.length > 0) {
+          throw new Error(
+            `lot override for ${component.itemId} names unknown lot(s): ${unknown.join(", ")}`,
+          );
+        }
         draws = override;
       } else {
         const available = await this.deps.lots.listAvailable(component.itemId, input.locationId);
-        draws = available.length > 0 ? selectFifoLots(available, withLoss.toFixed()) : [];
+        if (available.length === 0) {
+          if (lotControlled) {
+            // Refuse rather than consume untraceably. Consuming a lot-controlled
+            // material with an empty lot list produces stock nobody can recall.
+            throw new Error(
+              `no lots available for lot-controlled item ${component.itemId}; cannot record traceability`,
+            );
+          }
+          draws = [];
+        } else {
+          draws = selectFifoLots(available, withLoss.toFixed());
+        }
       }
       lotsByItem[component.itemId] = draws;
 
@@ -133,7 +167,13 @@ export class CompleteProductionBatch {
         reservedDelta: "0",
         incomingDelta: "0",
         occurredAt,
-        metadata: { batchId: input.batchId, lots: draws },
+        metadata: {
+          batchId: input.batchId,
+          lots: draws,
+          // Recorded because production_batch_lots.manual_override exists to be
+          // audited, and an override is a deliberate departure from FIFO.
+          manualOverride: override !== undefined,
+        },
       });
 
       if (loss.greaterThan(0)) {
