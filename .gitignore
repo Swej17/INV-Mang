@@ -12,3 +12,6 @@ desktop.ini
 .DS_Store
 .vscode/
 .idea/
+
+# Windows: a bash 2>NUL redirect creates a literal file by this name
+NUL
