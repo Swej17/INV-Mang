@@ -58,8 +58,19 @@ afterAll(async () => {
   await db?.drop();
 });
 
-function runner(handlers: Record<string, (job: JobRecord) => Promise<void>>, workerId = "w1"): JobRunner {
-  return new JobRunner(db.sql, handlers, { workerId, leaseSeconds: 30 });
+function runner(
+  handlers: Record<string, (job: JobRecord) => Promise<void>>,
+  workerId = "w1",
+  leaseSeconds = 30,
+): JobRunner {
+  return new JobRunner(db.sql, handlers, { workerId, leaseSeconds });
+}
+
+// Microsecond-precision epoch, not a JS Date: two sequential now()-derived
+// writes can land in the same millisecond, and Date truncates below that.
+async function leasedUntilEpochOf(id: string): Promise<number> {
+  const rows = await db.sql`SELECT extract(epoch from leased_until) AS epoch FROM jobs WHERE id = ${id}`;
+  return Number(rows[0]!["epoch"]);
 }
 
 describe("JobRunner", () => {
@@ -136,6 +147,82 @@ describe("JobRunner", () => {
     await enqueue("test.ok");
     await runner({}).claim();
     expect(await runner({}).reclaimExpired()).toBe(0);
+  });
+
+  it("renewLease extends leased_until for the worker holding the lease", async () => {
+    const id = await enqueue("test.ok");
+    await runner({}, "w1").claim();
+    const before = await leasedUntilEpochOf(id);
+    expect(await runner({}, "w1").renewLease(id)).toBe(true);
+    const after = await leasedUntilEpochOf(id);
+    expect(after).toBeGreaterThan(before);
+  });
+
+  it("renewLease is a no-op when another worker holds the lease", async () => {
+    const id = await enqueue("test.ok");
+    await runner({}, "w1").claim();
+    const before = await leasedUntilEpochOf(id);
+    // w2 never held this lease: renewing it must not extend w1's job.
+    expect(await runner({}, "w2").renewLease(id)).toBe(false);
+    expect(await leasedUntilEpochOf(id)).toBe(before);
+  });
+
+  it("renewLease is a no-op when the job is not RUNNING", async () => {
+    const id = await enqueue("test.ok");
+    await runner({ "test.ok": async () => {} }, "w1").runOnce();
+    expect(await statusOf(id)).toBe("COMPLETED");
+    expect(await runner({}, "w1").renewLease(id)).toBe(false);
+  });
+
+  it("completion is fenced: a worker that lost its lease cannot clobber the retry", async () => {
+    const id = await enqueue("test.ok");
+    await runner({}, "A").claim();
+    // Force-expire A's lease and let B reclaim and re-claim the job.
+    await db.sql`UPDATE jobs SET leased_until = now() - interval '1 minute' WHERE id = ${id}`;
+    expect(await runner({}, "B").reclaimExpired()).toBe(1);
+    await runner({}, "B").claim();
+    expect(await statusOf(id)).toBe("RUNNING");
+    // A does not know it lost the lease and tries to complete anyway.
+    await runner({}, "A").complete(id);
+    // B's claim must survive: A's write was not fenced by lease ownership.
+    expect(await statusOf(id)).toBe("RUNNING");
+  });
+
+  it("failure is fenced: a worker that lost its lease cannot clobber the retry", async () => {
+    const id = await enqueue("test.fail", { maxAttempts: 1 });
+    const jobA = (await runner({}, "A").claim())!;
+    await db.sql`UPDATE jobs SET leased_until = now() - interval '1 minute' WHERE id = ${id}`;
+    expect(await runner({}, "B").reclaimExpired()).toBe(1);
+    await runner({}, "B").claim();
+    expect(await statusOf(id)).toBe("RUNNING");
+    // A does not know it lost the lease and tries to record a failure anyway.
+    await runner({}, "A").fail(jobA, new Error("boom"));
+    expect(await statusOf(id)).toBe("RUNNING");
+  });
+
+  it("a long job's lease is renewed so reclaimExpired does not steal it", async () => {
+    const id = await enqueue("test.slow");
+    const ran: string[] = [];
+    const slowRunner = runner(
+      {
+        "test.slow": async (job) => {
+          await new Promise((resolve) => setTimeout(resolve, 2500));
+          ran.push(job.id);
+        },
+      },
+      "w1",
+      1,
+    );
+
+    const runPromise = slowRunner.runOnce();
+    // Original 1s lease would have expired by now without renewal; a fresh
+    // reclaimExpired() run must not find it stealable.
+    await new Promise((resolve) => setTimeout(resolve, 1800));
+    expect(await runner({}, "reclaimer").reclaimExpired()).toBe(0);
+
+    expect(await runPromise).toBe(true);
+    expect(ran).toEqual([id]);
+    expect(await statusOf(id)).toBe("COMPLETED");
   });
 
   it("takes the oldest due job first", async () => {
