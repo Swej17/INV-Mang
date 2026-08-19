@@ -5,6 +5,18 @@
   "type": "module",
   "scripts": {
     "build": "tsc --project tsconfig.json",
-    "typecheck": "tsc --project tsconfig.json --noEmit"
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@simple-flame/application": "workspace:*",
+    "@simple-flame/contracts": "workspace:*",
+    "@simple-flame/domain": "workspace:*",
+    "@simple-flame/persistence-contracts": "workspace:*",
+    "@simple-flame/persistence-postgres": "workspace:*",
+    "fastify": "5.6.1",
+    "@fastify/cookie": "11.0.2",
+    "@fastify/rate-limit": "10.3.0",
+    "postgres": "3.4.7"
   }
 }
