@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -49,6 +50,7 @@ beforeEach(async () => {
   if (!db) {
     db = await createDisposableDatabase();
     await db.sql.unsafe(migration("0001_inventory_ledger.sql"));
+    await db.sql.unsafe(migration("0007_purchase_ordered_cause.sql"));
   }
   await db.sql.unsafe("TRUNCATE inventory_ledger_entries, processed_commands RESTART IDENTITY CASCADE");
   await db.sql.unsafe("ALTER SEQUENCE inventory_revision_seq RESTART WITH 1");
@@ -256,5 +258,76 @@ describe("organization isolation", () => {
     await repo().appendOnce("0199a1f0-0000-7000-8000-000000000822", ORG_B, [receipt("900")]);
     expect(await repo().listEntries(ORG, ITEM)).toHaveLength(1);
     expect(await repo().listEntries(ORG_B, ITEM)).toHaveLength(1);
+  });
+});
+
+describe("0007 purchase-ordered cause migration", () => {
+  /**
+   * Applied to a database that ALREADY has 0001's table, because that is the
+   * only case where it can fail. 0001 declares the CHECK inline inside
+   * CREATE TABLE IF NOT EXISTS, so re-running 0001 on a live database silently
+   * does nothing — a fresh-database test would pass while every existing
+   * deployment kept rejecting the new cause.
+   */
+  let upgraded: DisposableDatabase;
+
+  beforeEach(async () => {
+    if (!upgraded) {
+      upgraded = await createDisposableDatabase();
+      await upgraded.sql.unsafe(migration("0001_inventory_ledger.sql"));
+    }
+  });
+
+  afterAll(async () => {
+    await upgraded?.drop();
+  });
+
+  async function insertCause(cause: string): Promise<void> {
+    const commandId = randomUUID();
+    await upgraded.sql`
+      INSERT INTO processed_commands (command_id, organization_id, result_json)
+      VALUES (${commandId}, ${ORG}, '{}'::jsonb)
+    `;
+    await upgraded.sql`
+      INSERT INTO inventory_ledger_entries
+        (id, organization_id, location_id, item_id, command_id, cause,
+         incoming_delta, occurred_at, revision)
+      VALUES (${randomUUID()}, ${ORG}, ${LOCATION}, ${ITEM}, ${commandId}, ${cause},
+              1, now(), nextval('inventory_revision_seq'))
+    `;
+  }
+
+  it("rejects the new cause before the migration runs", async () => {
+    await expect(insertCause("PURCHASE_ORDERED")).rejects.toThrow(/cause_known/);
+  });
+
+  it("accepts the new cause after the migration runs", async () => {
+    await upgraded.sql.unsafe(migration("0007_purchase_ordered_cause.sql"));
+    await expect(insertCause("PURCHASE_ORDERED")).resolves.toBeUndefined();
+  });
+
+  it("still refuses an unknown cause", async () => {
+    // The migration DROPs the constraint before re-adding it. Dropping and
+    // forgetting to re-add would make both tests above pass while the ledger
+    // silently accepted any string at all.
+    await upgraded.sql.unsafe(migration("0007_purchase_ordered_cause.sql"));
+    await expect(insertCause("NOT_A_REAL_CAUSE")).rejects.toThrow(/cause_known/);
+  });
+
+  it("is safe to run twice", async () => {
+    // Migrations get re-applied by accident; the second run must be a no-op
+    // rather than an error that halts a deployment.
+    //
+    // KNOWN LIMITATION: mutation-tested by removing `IF EXISTS`, and this still
+    // passed. The constraint always exists when 0007 runs — 0001 creates it and
+    // 0007 re-adds it — so the guard never fires on any reachable path. It is
+    // kept as protection for a database where an operator dropped the
+    // constraint by hand to backfill, which no test here can stage. What this
+    // test does prove is that a second run leaves the constraint intact and
+    // still enforcing, which is the property a deployment depends on.
+    await upgraded.sql.unsafe(migration("0007_purchase_ordered_cause.sql"));
+    await upgraded.sql.unsafe(migration("0007_purchase_ordered_cause.sql"));
+    await expect(insertCause("PURCHASE_ORDERED")).resolves.toBeUndefined();
+    await expect(insertCause("NOT_A_REAL_CAUSE")).rejects.toThrow(/cause_known/);
   });
 });

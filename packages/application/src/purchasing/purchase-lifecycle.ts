@@ -68,16 +68,17 @@ export class PurchaseLifecycle {
     const entry: LedgerEntryDraft = {
       itemId: input.itemId,
       locationId: input.locationId,
-      cause: "SYNCHRONIZATION_CORRECTION",
+      cause: "PURCHASE_ORDERED",
       onHandDelta: "0",
       reservedDelta: "0",
       // Incoming only. Nothing has physically arrived.
       incomingDelta: quantity.times(conversion).toFixed(),
       occurredAt: this.deps.clock.now(),
+      // No `kind` here: the cause carries it now. Duplicating it in free-form
+      // metadata invites the two to disagree.
       metadata: {
         purchaseOrderId: input.purchaseOrderId,
         expectedArrival: input.expectedArrival,
-        kind: "PURCHASE_ORDERED",
       },
     };
 

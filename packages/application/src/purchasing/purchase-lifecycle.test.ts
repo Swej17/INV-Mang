@@ -70,8 +70,33 @@ describe("markOrdered", () => {
     await lifecycle.markOrdered(base);
     expect(ledger.appended[0]!.entries[0]!.metadata).toMatchObject({
       purchaseOrderId: PO,
-      kind: "PURCHASE_ORDERED",
     });
+  });
+
+  it("posts a purchase cause, not a synchronization correction", async () => {
+    // The cause is the audit trail's own vocabulary. Filing a purchase under
+    // SYNCHRONIZATION_CORRECTION made every order look like a sync repair, so a
+    // genuine repair — the thing you most want to find when numbers disagree —
+    // became indistinguishable from routine buying.
+    await lifecycle.markOrdered(base);
+    expect(ledger.appended[0]!.entries[0]!.cause).toBe("PURCHASE_ORDERED");
+  });
+
+  it("distinguishes an expected inbound from stock actually received", async () => {
+    // Both halves of the lifecycle touch incoming; only one of them is real
+    // stock. Sharing a cause would make "ordered" and "arrived" the same event.
+    await lifecycle.markOrdered(base);
+    await lifecycle.receive({
+      commandId: "0199a700-0000-7000-8000-0000000000c2",
+      organizationId: ORG,
+      purchaseOrderId: PO,
+      itemId: WAX,
+      locationId: LOCATION,
+      receivedBaseQuantity: "100",
+      outstandingBaseQuantity: "100",
+    });
+    const causes = ledger.appended.map((call) => call.entries[0]!.cause);
+    expect(causes).toEqual(["PURCHASE_ORDERED", "RECEIPT"]);
   });
 
   it("uses the caller's commandId so a retry is idempotent", async () => {

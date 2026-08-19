@@ -296,3 +296,81 @@ describe("CompleteProductionBatch", () => {
     expect(ledger.appended[0]!.commandId).toBe(COMMAND);
   });
 });
+
+describe("countable components in the ledger", () => {
+  /**
+   * The consequence of `countable` that actually reaches storage.
+   *
+   * `requiredForUnits` decides the consumption delta posted to the ledger, and
+   * the ledger is append-only. A fractional vessel written here is not a
+   * display rounding issue — it is a permanent 0.05 of a jar in on-hand stock
+   * that no later correction removes without a compensating entry.
+   *
+   * Consumption and process loss are posted separately, so these assert the
+   * TOTAL movement rather than either field: the total is what the shelf
+   * actually loses, and asserting one half would pass while the other drifted.
+   */
+  function totalMoved(itemId: string): string {
+    return ledger
+      .appended[0]!.entries.filter((entry) => entry.itemId === itemId)
+      .reduce((sum, entry) => sum + Number(entry.onHandDelta), 0)
+      .toString();
+  }
+
+  it("takes whole vessels off the shelf when breakage makes the total fractional", async () => {
+    recipe = {
+      ...recipe,
+      components: components([
+        {},
+        {
+          perUnitBase: "1",
+          loss: { mode: "PERCENT_PER_UNIT", percentage: "0.005" },
+          countable: true,
+        },
+      ]),
+    };
+    await useCase().execute(input({ finishedUnits: 10 }));
+    // 10 x 1 x 1.005 = 10.05 vessels. You open eleven.
+    expect(totalMoved(VESSEL)).toBe("-11");
+  });
+
+  it("splits that whole number into consumption and loss without inventing a fraction", async () => {
+    // Both halves must stay whole too: rounding only the total would leave
+    // 10 consumed + 1.05 lost, which is the same fractional jar in a new place.
+    recipe = {
+      ...recipe,
+      components: components([
+        {},
+        {
+          perUnitBase: "1",
+          loss: { mode: "PERCENT_PER_UNIT", percentage: "0.005" },
+          countable: true,
+        },
+      ]),
+    };
+    await useCase().execute(input({ finishedUnits: 10 }));
+    const vessels = ledger.appended[0]!.entries.filter((entry) => entry.itemId === VESSEL);
+    expect(vessels.map((entry) => [entry.cause, entry.onHandDelta])).toEqual([
+      ["PRODUCTION_CONSUMPTION", "-10"],
+      ["PROCESS_LOSS", "-1"],
+    ]);
+  });
+
+  it("still takes wax to the gram under the same loss policy", async () => {
+    // The twin: identical loss on a non-countable component must stay exact,
+    // or the rule has been applied to everything rather than to countables.
+    recipe = {
+      ...recipe,
+      components: components([
+        {
+          perUnitBase: "100",
+          loss: { mode: "PERCENT_PER_UNIT", percentage: "0.005" },
+          countable: false,
+        },
+        {},
+      ]),
+    };
+    await useCase().execute(input({ finishedUnits: 10 }));
+    expect(totalMoved(WAX)).toBe("-1005");
+  });
+});

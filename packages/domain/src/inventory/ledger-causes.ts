@@ -7,6 +7,9 @@
  */
 export const LEDGER_CAUSES = [
   "RECEIPT",
+  // An expected inbound, not stock in hand. Distinct from RECEIPT because
+  // ordering and arriving are different events with different consequences.
+  "PURCHASE_ORDERED",
   "PHYSICAL_COUNT_ADJUSTMENT",
   "DAMAGE_OR_SPOILAGE",
   "PRODUCTION_ALLOCATION",

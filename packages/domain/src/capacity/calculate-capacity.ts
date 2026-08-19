@@ -85,7 +85,7 @@ export function requiredForUnits(
   const count = new Decimal(units.toString());
   let required = perUnit.times(count);
 
-  if (!lossEnabled || component.loss.mode === "NONE") return required;
+  if (!lossEnabled || component.loss.mode === "NONE") return whole(component, required);
 
   const loss = component.loss;
   if (loss.mode === "PERCENT_PER_UNIT" || loss.mode === "BOTH") {
@@ -103,7 +103,22 @@ export function requiredForUnits(
       batches.times(assertNonNegativeDecimal(loss.fixedPerBatchBase, "loss.fixedPerBatchBase")),
     );
   }
-  return required;
+  return whole(component, required);
+}
+
+/**
+ * Round a requirement up to a whole item when the component cannot be split.
+ *
+ * Applied to the TOTAL rather than per unit: half a label sheet per candle over
+ * ten candles is five whole sheets, not ten. `complete-batch` posts this figure
+ * to the ledger verbatim, so anything fractional here becomes a fractional
+ * vessel sitting in on-hand stock for good.
+ */
+function whole(
+  component: RecipeComponent,
+  required: InstanceType<typeof Decimal>,
+): InstanceType<typeof Decimal> {
+  return component.countable ? required.ceil() : required;
 }
 
 /**
@@ -146,9 +161,10 @@ function maxUnitsFor(
 
 function availableFor(
   input: CapacityInput,
-  itemId: string,
+  component: RecipeComponent,
   applyProtection: boolean,
 ): InstanceType<typeof Decimal> {
+  const itemId = component.itemId;
   // An item with no entry is absent, not unlimited. Treating a missing key as
   // infinite would silently promise material nobody has.
   const raw = input.availableByItem[itemId] ?? "0";
@@ -159,7 +175,12 @@ function availableFor(
       available = available.minus(assertNonNegativeDecimal(held, `protectedByItem[${itemId}]`));
     }
   }
-  return available.isNegative() ? new Decimal(0) : available;
+  if (available.isNegative()) return new Decimal(0);
+  // A countable item rounds DOWN, and only after protection has been taken out:
+  // flooring first would round the held-back portion away and hand the planner
+  // stock the owner deliberately reserved. Unlike protection and loss this is
+  // not a policy, so it applies to the theoretical figure as well.
+  return component.countable ? available.floor() : available;
 }
 
 export function calculateCapacity(input: CapacityInput): CapacityResult {
@@ -175,11 +196,11 @@ export function calculateCapacity(input: CapacityInput): CapacityResult {
 
   const theoreticalPerComponent = critical.map((component) => ({
     component,
-    units: maxUnitsFor(component, availableFor(input, component.itemId, false), false),
+    units: maxUnitsFor(component, availableFor(input, component, false), false),
   }));
   const adjustedPerComponent = critical.map((component) => ({
     component,
-    units: maxUnitsFor(component, availableFor(input, component.itemId, true), input.lossEnabled),
+    units: maxUnitsFor(component, availableFor(input, component, true), input.lossEnabled),
   }));
 
   const theoreticalUnits = theoreticalPerComponent.reduce(
@@ -201,7 +222,7 @@ export function calculateCapacity(input: CapacityInput): CapacityResult {
   const oneMore = adjustedUnits + 1n;
   const shortfallForOneMore: ComponentShortfall[] = [];
   for (const component of critical) {
-    const available = availableFor(input, component.itemId, true);
+    const available = availableFor(input, component, true);
     const required = requiredForUnits(component, oneMore, input.lossEnabled);
     if (required.greaterThan(available)) {
       shortfallForOneMore.push({

@@ -176,6 +176,7 @@ describe("InventoryEventV1", () => {
     const causes = InventoryEventV1.shape.cause.options as readonly string[];
     for (const required of [
       "RECEIPT",
+      "PURCHASE_ORDERED",
       "PHYSICAL_COUNT_ADJUSTMENT",
       "DAMAGE_OR_SPOILAGE",
       "PRODUCTION_ALLOCATION",
