@@ -94,3 +94,37 @@ export class InsufficientAvailableError extends Error {
     this.name = "InsufficientAvailableError";
   }
 }
+
+/**
+ * Raised when one organization submits a command id another has already used.
+ *
+ * `commandId` is client-supplied, so this is reachable from outside. Replaying
+ * the first organization's result would leak its entries and silently discard
+ * the second's command, so a collision must fail loudly instead.
+ */
+export class CommandIdCollisionError extends Error {
+  constructor(readonly commandId: string) {
+    super(`command id ${commandId} is already in use by another organization`);
+    this.name = "CommandIdCollisionError";
+  }
+}
+
+/**
+ * Raised when a command would drive a projected quantity to a value the ledger
+ * cannot mean — reserved or incoming below zero.
+ *
+ * Distinct from InsufficientAvailableError: that one reports stock a caller
+ * asked for and cannot have, this one reports a caller-supplied delta that
+ * contradicts history the repository already holds.
+ */
+export class InvalidLedgerStateError extends Error {
+  constructor(
+    readonly itemId: string,
+    readonly locationId: string,
+    readonly field: "reserved" | "incoming",
+    readonly value: string,
+  ) {
+    super(`invalid ${field} for item ${itemId} at ${locationId}: would become ${value}`);
+    this.name = "InvalidLedgerStateError";
+  }
+}

@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 
 import { assertCanonicalDecimal, projectInventory, type LedgerEntryInput } from "@simple-flame/domain";
 import {
+  CommandIdCollisionError,
   InsufficientAvailableError,
+  InvalidLedgerStateError,
   type AppendResult,
   type InventoryLedgerRepository,
   type LedgerEntryDraft,
@@ -30,8 +32,14 @@ export class PostgresInventoryLedgerRepository implements InventoryLedgerReposit
     return this.sql.begin(async (tx) => {
       // Idempotency first: a replay returns the original result and posts
       // nothing, so a client retrying an unacknowledged command is safe.
+      //
+      // Scoped by organization because commandId is client-supplied. Without the
+      // filter, one tenant naming an id another has used receives that tenant's
+      // stored entries as a "duplicate" while its own command silently never
+      // applies.
       const existing = await tx`
-        SELECT result_json FROM processed_commands WHERE command_id = ${commandId}
+        SELECT result_json FROM processed_commands
+        WHERE command_id = ${commandId} AND organization_id = ${organizationId}
       `;
       if (existing.length > 0) {
         const original = existing[0]!["result_json"] as AppendResult;
@@ -74,10 +82,25 @@ export class PostgresInventoryLedgerRepository implements InventoryLedgerReposit
 
       const result: AppendResult = { revision, duplicate: false, entries: records };
 
-      await tx`
-        INSERT INTO processed_commands (command_id, organization_id, result_json)
-        VALUES (${commandId}, ${organizationId}, ${tx.json(result as never)})
-      `;
+      // command_id stays the global primary key, so the lookup above missing a
+      // row while this insert conflicts means another organization owns the id.
+      // The transaction is already aborted at this point; rethrowing typed lets
+      // the sync layer report a collision instead of a bare constraint error.
+      //
+      // One narrow exception: a same-organization retry that overtakes its own
+      // in-flight original reads before the row exists and lands here too. That
+      // was already a hard constraint error before this catch, and closing it
+      // means moving the replay lookup inside the advisory locks — a change to
+      // the hot path that wants its own test, not a silent rider on this one.
+      try {
+        await tx`
+          INSERT INTO processed_commands (command_id, organization_id, result_json)
+          VALUES (${commandId}, ${organizationId}, ${tx.json(result as never)})
+        `;
+      } catch (error) {
+        if (isUniqueViolation(error)) throw new CommandIdCollisionError(commandId);
+        throw error;
+      }
 
       for (const record of records) {
         await tx`
@@ -143,6 +166,18 @@ export class PostgresInventoryLedgerRepository implements InventoryLedgerReposit
       }
       if (onHand.isNegative()) {
         throw new InsufficientAvailableError(itemId, locationId, "on-hand", projected.onHand);
+      }
+
+      // Reserved and incoming are magnitudes; below zero they are not a shortage
+      // but a corrupted count. Reachable from a caller-supplied outstanding
+      // quantity that overshoots what the ledger actually holds, and every
+      // planner downstream then reasons from the corrupted number.
+      if (reserved.isNegative()) {
+        throw new InvalidLedgerStateError(itemId, locationId, "reserved", projected.reserved);
+      }
+      const incoming = assertCanonicalDecimal(projected.incoming);
+      if (incoming.isNegative()) {
+        throw new InvalidLedgerStateError(itemId, locationId, "incoming", projected.incoming);
       }
     }
   }
@@ -219,6 +254,17 @@ export class PostgresInventoryLedgerRepository implements InventoryLedgerReposit
   ): Promise<readonly LedgerEntryRecord[]> {
     return this.readEntries(this.sql, organizationId, itemId);
   }
+}
+
+/** SQLSTATE unique_violation. postgres.js surfaces it as `code` on the error. */
+const UNIQUE_VIOLATION = "23505";
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === UNIQUE_VIOLATION
+  );
 }
 
 /**
