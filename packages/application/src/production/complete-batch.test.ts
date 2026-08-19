@@ -337,10 +337,17 @@ describe("CompleteProductionBatch", () => {
 
       it("refuses a zero-quantity draw", async () => {
         // Zero is not negative, so assertNonNegativeDecimal alone would accept
-        // it; a draw that takes nothing is still not a valid traceability record.
+        // it; a draw that takes nothing is still not a valid traceability
+        // record. Both lots are declared with plenty of remaining stock and
+        // neither lotId repeats, so only the zero check can be what catches
+        // this -- an undeclared LOT_B would let the unknown-lot check fire
+        // instead, killing the mutation for the wrong reason.
         lots = {
           ...lots,
-          [WAX]: [{ lotId: LOT_A, receivedDate: "2026-08-01", bestByDate: null, remaining: "100" }],
+          [WAX]: [
+            { lotId: LOT_A, receivedDate: "2026-08-01", bestByDate: null, remaining: "100" },
+            { lotId: LOT_B, receivedDate: "2026-08-01", bestByDate: null, remaining: "100" },
+          ],
         };
         await expect(
           run({ lotOverrides: { [WAX]: [draw(LOT_A, "0"), draw(LOT_B, "5")] } }),
