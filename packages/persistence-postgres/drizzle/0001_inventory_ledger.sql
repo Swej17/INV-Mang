@@ -89,3 +89,6 @@ SELECT
     COALESCE(MAX(revision), 0)        AS revision
 FROM inventory_ledger_entries
 GROUP BY item_id, location_id, organization_id;
+
+COMMENT ON COLUMN inventory_projections.available IS
+  'on_hand - reserved only. Does NOT subtract protected stock: the domain''s available is max(0, on_hand - reserved - protected). Do not promise from this column.';

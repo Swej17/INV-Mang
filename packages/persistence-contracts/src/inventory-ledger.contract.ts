@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CommandIdCollisionError,
   InsufficientAvailableError,
+  InvalidLedgerStateError,
   type InventoryLedgerRepository,
   type LedgerEntryDraft,
 } from "./inventory-ledger.js";
@@ -24,6 +26,8 @@ export function runInventoryLedgerContract(
 ): void {
   describe(`${name} satisfies the inventory ledger contract`, () => {
     const ORG = "0199a1f0-0000-7000-8000-000000000001";
+    // A second tenant, so idempotency can be proven to be scoped rather than global.
+    const OTHER_ORG = "0199a1f0-0000-7000-8000-000000000002";
     const ITEM = "0199a1f0-0000-7000-8000-000000000004";
     const LOCATION = "0199a1f0-0000-7000-8000-000000000005";
 
@@ -43,6 +47,19 @@ export function runInventoryLedgerContract(
       return { ...receipt("0"), cause: "ORDER_RESERVATION", reservedDelta: quantity };
     }
 
+    function release(quantity: string): LedgerEntryDraft {
+      return { ...receipt("0"), cause: "RESERVATION_RELEASE", reservedDelta: `-${quantity}` };
+    }
+
+    /**
+     * A receipt against an expected inbound, which clears the incoming it
+     * arrives against. Called with no matching order outstanding, this is the
+     * shape of a caller-supplied outstanding quantity that overshoots.
+     */
+    function receiptClearingIncoming(quantity: string): LedgerEntryDraft {
+      return { ...receipt(quantity), incomingDelta: `-${quantity}` };
+    }
+
     it("posts one receipt exactly once", async () => {
       const { repository, reset, dispose } = await createRepository();
       try {
@@ -58,6 +75,65 @@ export function runInventoryLedgerContract(
 
         const projection = await repository.getProjection(ORG, ITEM, LOCATION);
         expect(projection.onHand).toBe("4535.9237");
+      } finally {
+        await dispose();
+      }
+    });
+
+    it("refuses a command id replayed by a different organization", async () => {
+      const { repository, reset, dispose } = await createRepository();
+      try {
+        await reset();
+        // commandId is client-supplied, so one tenant can name an id another
+        // has used. Treating that as a replay would hand the second tenant the
+        // first one's stored result and silently drop its own command.
+        const commandId = "0199a1f0-0000-7000-8000-0000000000ce";
+        await repository.appendOnce(commandId, ORG, [receipt("10")]);
+        await expect(
+          repository.appendOnce(commandId, OTHER_ORG, [receipt("7")]),
+        ).rejects.toThrow(CommandIdCollisionError);
+
+        // Neither tenant sees the other: the collision is loud and writes nothing.
+        expect(await repository.listEntries(OTHER_ORG, ITEM)).toHaveLength(0);
+        expect(await repository.listEntries(ORG, ITEM)).toHaveLength(1);
+        expect((await repository.getProjection(ORG, ITEM, LOCATION)).onHand).toBe("10");
+      } finally {
+        await dispose();
+      }
+    });
+
+    it("refuses a command that would drive reserved negative", async () => {
+      const { repository, reset, dispose } = await createRepository();
+      try {
+        await reset();
+        await repository.appendOnce("0199a1f0-0000-7000-8000-0000000000cf", ORG, [receipt("10")]);
+        // Releasing a reservation that was never made. Reserved would land on
+        // -3 while on-hand stays 10, so neither of the older checks notices.
+        await expect(
+          repository.appendOnce("0199a1f0-0000-7000-8000-0000000000e0", ORG, [release("3")]),
+        ).rejects.toThrow(InvalidLedgerStateError);
+
+        expect(await repository.listEntries(ORG, ITEM)).toHaveLength(1);
+        expect((await repository.getProjection(ORG, ITEM, LOCATION)).reserved).toBe("0");
+      } finally {
+        await dispose();
+      }
+    });
+
+    it("refuses a command that would drive incoming negative", async () => {
+      const { repository, reset, dispose } = await createRepository();
+      try {
+        await reset();
+        // Clearing inbound stock that was never ordered. On-hand rises to 5, so
+        // the on-hand and reserved checks both pass and only incoming is wrong.
+        await expect(
+          repository.appendOnce("0199a1f0-0000-7000-8000-0000000000e1", ORG, [
+            receiptClearingIncoming("5"),
+          ]),
+        ).rejects.toThrow(InvalidLedgerStateError);
+
+        expect(await repository.listEntries(ORG, ITEM)).toHaveLength(0);
+        expect((await repository.getProjection(ORG, ITEM, LOCATION)).incoming).toBe("0");
       } finally {
         await dispose();
       }

@@ -1,5 +1,7 @@
 export {
+  CommandIdCollisionError,
   InsufficientAvailableError,
+  InvalidLedgerStateError,
   type AppendResult,
   type InventoryLedgerRepository,
   type LedgerEntryDraft,
