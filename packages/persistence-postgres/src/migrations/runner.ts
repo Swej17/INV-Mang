@@ -35,18 +35,18 @@ export const MIGRATION_LOCK_KEY = 0x5f_4d_49_47;
  * Refusing is the whole behaviour: the runner cannot know whether the edit was
  * a typo fix or a semantic change, so it reports the file and stops.
  *
- * `name` deliberately carries the migration filename rather than the class
- * name, per the interface this task publishes; identify the error with
- * `instanceof`.
+ * The filename lives in `migrationName`, leaving `name` to identify the error
+ * type the way every logger and `toString()` expects.
  */
 export class MigrationChecksumError extends Error {
   constructor(
     readonly version: string,
-    override readonly name: string,
+    readonly migrationName: string,
   ) {
     super(
-      `Migration ${name} has changed since it was applied. Applied migrations are append-only: restore the file, or apply the change as a new migration.`,
+      `migration ${migrationName} (version ${version}) changed after it was applied; migrations are frozen once applied — correct it in a new migration`,
     );
+    this.name = "MigrationChecksumError";
   }
 }
 

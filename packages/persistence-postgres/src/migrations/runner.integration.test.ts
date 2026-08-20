@@ -128,7 +128,13 @@ describe("a migration that changed on disk after it was applied", () => {
     expect(failure).toBeInstanceOf(MigrationChecksumError);
     // The unchanged 0001 is the other candidate; naming 0002 is the claim.
     expect((failure as MigrationChecksumError).version).toBe("0002");
-    expect((failure as MigrationChecksumError).name).toBe("0002_ledger.sql");
+    expect((failure as MigrationChecksumError).migrationName).toBe("0002_ledger.sql");
+    // `name` identifies the error TYPE — it is what loggers and
+    // Error.prototype.toString() print. The filename has its own field.
+    expect((failure as MigrationChecksumError).name).toBe("MigrationChecksumError");
+    expect(String(failure)).toBe(
+      "MigrationChecksumError: migration 0002_ledger.sql (version 0002) changed after it was applied; migrations are frozen once applied — correct it in a new migration",
+    );
   });
 
   it("applies nothing before refusing", async () => {
