@@ -87,11 +87,36 @@ export class JobRunner {
     return rows.length;
   }
 
+  /**
+   * Extend the lease on a job this worker still holds.
+   *
+   * Called on a heartbeat interval well under leaseSeconds so a job whose
+   * handler outlives one lease period is not reclaimed and re-run by another
+   * worker while still in flight. Returns false once this worker no longer
+   * holds the lease (already reclaimed, or the job finished), so the caller
+   * can stop renewing rather than fight a worker that has moved on.
+   */
+  async renewLease(jobId: string): Promise<boolean> {
+    const rows = await this.sql`
+      UPDATE jobs SET leased_until = now() + (${this.options.leaseSeconds} || ' seconds')::interval
+      WHERE id = ${jobId} AND leased_by = ${this.options.workerId} AND status = 'RUNNING'
+      RETURNING id
+    `;
+    return rows.length > 0;
+  }
+
+  /**
+   * Terminal writes are fenced on lease ownership: the lease is only a
+   * guarantee if every write that assumes it re-checks it. Without the
+   * leased_by/status guard, a worker whose lease already expired and was
+   * reclaimed by another worker could still complete/fail the job out from
+   * under the new holder, clobbering its retry.
+   */
   async complete(jobId: string): Promise<void> {
     await this.sql`
       UPDATE jobs SET status = 'COMPLETED', completed_at = now(),
                       leased_until = NULL, leased_by = NULL
-      WHERE id = ${jobId}
+      WHERE id = ${jobId} AND leased_by = ${this.options.workerId} AND status = 'RUNNING'
     `;
   }
 
@@ -109,7 +134,7 @@ export class JobRunner {
       await this.sql`
         UPDATE jobs SET status = 'DEAD_LETTER', last_error = ${error.message},
                         leased_until = NULL, leased_by = NULL
-        WHERE id = ${job.id}
+        WHERE id = ${job.id} AND leased_by = ${this.options.workerId} AND status = 'RUNNING'
       `;
       return "DEAD_LETTER";
     }
@@ -118,7 +143,7 @@ export class JobRunner {
       UPDATE jobs SET status = 'PENDING', last_error = ${error.message},
                       run_after = now() + (${backoffSeconds} || ' seconds')::interval,
                       leased_until = NULL, leased_by = NULL
-      WHERE id = ${job.id}
+      WHERE id = ${job.id} AND leased_by = ${this.options.workerId} AND status = 'RUNNING'
     `;
     return "RETRY";
   }
@@ -140,11 +165,24 @@ export class JobRunner {
       return true;
     }
 
+    // Heartbeat well inside the lease window (a third of it) so a handler
+    // that outlives one lease period keeps its claim instead of being
+    // reclaimed and re-run by another worker while still executing.
+    const heartbeatMs = Math.max(1, this.options.leaseSeconds / 3) * 1000;
+    const heartbeat = setInterval(() => {
+      // Fire-and-forget: a transient renewal failure must not crash the
+      // worker mid-handler. Losing the race just means the lease lapses and
+      // the fenced terminal writes below become no-ops for this worker.
+      this.renewLease(job.id).catch(() => {});
+    }, heartbeatMs);
+
     try {
       await handler(job);
       await this.complete(job.id);
     } catch (error) {
       await this.fail(job, error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      clearInterval(heartbeat);
     }
     return true;
   }
