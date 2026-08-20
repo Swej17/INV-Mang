@@ -109,12 +109,27 @@ export class JobRunner {
    * Terminal writes are fenced on lease ownership: the lease is only a
    * guarantee if every write that assumes it re-checks it. Without the
    * leased_by/status guard, a worker whose lease already expired and was
-   * reclaimed by another worker could still complete/fail the job out from
-   * under the new holder, clobbering its retry.
+   * reclaimed by another worker could still complete/fail/dead-letter the
+   * job out from under the new holder, clobbering its retry.
    */
   async complete(jobId: string): Promise<void> {
     await this.sql`
       UPDATE jobs SET status = 'COMPLETED', completed_at = now(),
+                      leased_until = NULL, leased_by = NULL
+      WHERE id = ${jobId} AND leased_by = ${this.options.workerId} AND status = 'RUNNING'
+    `;
+  }
+
+  /**
+   * Dead-letter a job whose kind has no registered handler.
+   *
+   * A missing handler is a deployment fault, not a transient failure:
+   * retrying cannot fix it, so this skips the backoff/retry path in fail()
+   * entirely. Fenced the same as complete()/fail() above.
+   */
+  async deadLetterUnknownKind(jobId: string, kind: string): Promise<void> {
+    await this.sql`
+      UPDATE jobs SET status = 'DEAD_LETTER', last_error = ${`no handler for kind ${kind}`},
                       leased_until = NULL, leased_by = NULL
       WHERE id = ${jobId} AND leased_by = ${this.options.workerId} AND status = 'RUNNING'
     `;
@@ -155,20 +170,18 @@ export class JobRunner {
 
     const handler = this.handlers[job.kind];
     if (!handler) {
-      // An unknown kind is a deployment problem, not a transient failure:
-      // retrying cannot fix it, so it dead-letters immediately.
-      await this.sql`
-        UPDATE jobs SET status = 'DEAD_LETTER', last_error = ${`no handler for kind ${job.kind}`},
-                        leased_until = NULL, leased_by = NULL
-        WHERE id = ${job.id}
-      `;
+      await this.deadLetterUnknownKind(job.id, job.kind);
       return true;
     }
 
     // Heartbeat well inside the lease window (a third of it) so a handler
     // that outlives one lease period keeps its claim instead of being
-    // reclaimed and re-run by another worker while still executing.
-    const heartbeatMs = Math.max(1, this.options.leaseSeconds / 3) * 1000;
+    // reclaimed and re-run by another worker while still executing. Clamped
+    // in MILLISECONDS, not seconds: the previous `Math.max(1, leaseSeconds /
+    // 3) * 1000` clamped the pre-multiplication value, so leaseSeconds: 1
+    // produced a 1000ms heartbeat — firing exactly when the lease expires,
+    // not "well inside" it.
+    const heartbeatMs = Math.max(250, (this.options.leaseSeconds * 1000) / 3);
     const heartbeat = setInterval(() => {
       // Fire-and-forget: a transient renewal failure must not crash the
       // worker mid-handler. Losing the race just means the lease lapses and

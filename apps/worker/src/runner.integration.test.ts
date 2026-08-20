@@ -200,6 +200,20 @@ describe("JobRunner", () => {
     expect(await statusOf(id)).toBe("RUNNING");
   });
 
+  it("unknown-kind dead-lettering is fenced: a worker that lost its lease cannot clobber the retry", async () => {
+    const id = await enqueue("test.unregistered");
+    await runner({}, "A").claim();
+    await db.sql`UPDATE jobs SET leased_until = now() - interval '1 minute' WHERE id = ${id}`;
+    expect(await runner({}, "B").reclaimExpired()).toBe(1);
+    await runner({}, "B").claim();
+    expect(await statusOf(id)).toBe("RUNNING");
+    // A does not know it lost the lease and tries to dead-letter it anyway.
+    await runner({}, "A").deadLetterUnknownKind(id, "test.unregistered");
+    // B's claim must survive: this was the one terminal write missing the
+    // leased_by/status guard its two neighbours already had.
+    expect(await statusOf(id)).toBe("RUNNING");
+  });
+
   it("retry-scheduling failure is fenced: a worker that lost its lease cannot clobber the retry", async () => {
     // Same as above but with attempts left, so fail() takes the RETRY branch
     // (reschedule to PENDING) rather than DEAD_LETTER. That branch has its

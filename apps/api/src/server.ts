@@ -126,8 +126,6 @@ function revisionChangedConflict(
 export type ServerDeps = Readonly<{
   sql: Sql;
   sessions: SessionStore;
-  /** Injected so tests are deterministic. */
-  now?: () => Date;
 }>;
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -158,6 +156,15 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
    * excuse another device's writes by naming their command ids — including as
    * replays, which are accepted without posting and so would whitelist a
    * competing writer at no cost.
+   *
+   * `applied` carries a narrower form of that same risk: appendOnce's
+   * duplicate check is keyed on commandId + organizationId only, not on
+   * payload equivalence, so a same-org client can still submit a foreign
+   * commandId as a replay ahead of a reserve and have it accepted here too,
+   * exempting it from this push's own staleness gate. Parked (see
+   * docs/agent-handoff.md) because the gate is advisory — appendOnce's
+   * availability check is the hard guarantee — and closing it would make
+   * legitimate partial-batch retries fail with REVISION_CHANGED.
    */
   async function firstItemChangedSince(
     organizationId: string,
