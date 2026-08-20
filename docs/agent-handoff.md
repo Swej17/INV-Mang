@@ -236,6 +236,28 @@ reader does not have to rediscover them from source.
    anywhere; it has been removed rather than wired up, so as not to advertise a
    determinism seam that doesn't exist.
 
+## Found during the remediation, not fixed by it
+
+Two defects surfaced while closing the review's findings. Neither belongs to a
+finding this branch set out to close, so both were recorded rather than folded
+into an unrelated commit.
+
+1. **`/v1/sync/pull` violates its own contract.** The handler selects raw
+   snake_case columns (`id, item_id, location_id, cause, …`) and returns them
+   verbatim. `InventoryEventV1` requires camelCase plus `commandId`,
+   `organizationId`, `metadata` and `compensatesEventId` — none of which the
+   SELECT retrieves. A client parsing the pull response against the published
+   contract fails today. Pre-existing; the remediation only touched the query
+   parsing on that route, never the SELECT or the response mapping. Fixing it
+   means widening the SELECT and mapping the rows, and it should land with a
+   `SyncPullResultV1` response schema so the two cannot drift again.
+2. **A mid-batch uncaught exception leaves no audit trail.** Every *handled*
+   push exit (200, 403, 409, 422) now records what landed and why it stopped.
+   The `throw error` fallthrough for unrecognised error types does not, so a
+   500 after partial commits is invisible in `audit_events` — the same gap the
+   remediation closed for the four handled codes, surviving on the one path it
+   did not name.
+
 ## CI does not run this branch's strongest new invariants
 
 The 18 shared-contract cases in
