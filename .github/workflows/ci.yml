@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - phase1/integration
+      - main
+  pull_request:
+    branches:
+      - phase1/integration
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: corepack pnpm lint
+
+      - name: Typecheck
+        run: corepack pnpm typecheck
+
+      - name: Check package boundaries
+        run: corepack pnpm check:boundaries
+
+      # Unit tests only. apps/api, apps/worker, and packages/persistence-postgres
+      # only have *.integration.test.ts suites, which need a real PostgreSQL
+      # instance and a migration runner that doesn't exist yet (open backlog
+      # item, see docs/agent-handoff.md). `corepack pnpm test` at the repo root
+      # would pick those up too (they match the same *.test.ts glob), so this
+      # step runs vitest directly with an explicit exclude instead.
+      - name: Test
+        run: |
+          corepack pnpm exec node --test scripts/check-boundaries.test.mjs
+          corepack pnpm exec vitest run --exclude "**/*.integration.test.ts"
