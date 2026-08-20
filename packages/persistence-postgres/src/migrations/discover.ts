@@ -37,7 +37,10 @@ export function discoverMigrations(directory: string): readonly DiscoveredMigrat
     // Ignore non-SQL files.
     if (!name.endsWith(".sql")) continue;
 
-    // Parse and validate: must match NNNN_name.sql where NNNN is digits.
+    // Parse and validate: must match NNNN_name.sql where NNNN is exactly 4 digits.
+    // The \d{4} requirement caps the scheme at 9999 migrations and ensures that
+    // numeric and lexicographic sort produce identical results. Keep the numeric sort:
+    // it is correct and remains correct if the width rule ever changes.
     const match = name.match(/^(\d{4})_(.+)\.sql$/);
     if (!match) {
       throw new Error(

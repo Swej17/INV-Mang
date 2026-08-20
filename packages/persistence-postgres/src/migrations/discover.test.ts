@@ -19,9 +19,12 @@ test("orders by version and tolerates the deliberate 0005 gap", () => {
   expect(found.map((m) => m.version)).toEqual(["0001", "0006", "0008"]);
 });
 
-test("orders numerically, not lexicographically", () => {
-  const found = discoverMigrations(fixture("0010_ten.sql", "0009_nine.sql"));
-  expect(found.map((m) => m.version)).toEqual(["0009", "0010"]);
+test("rejects version numbers that are not exactly 4 digits (too short)", () => {
+  expect(() => discoverMigrations(fixture("001_short.sql"))).toThrow(/001_short\.sql/);
+});
+
+test("rejects version numbers that are not exactly 4 digits (too long)", () => {
+  expect(() => discoverMigrations(fixture("00010_long.sql"))).toThrow(/00010_long\.sql/);
 });
 
 test("refuses two files claiming the same version", () => {
