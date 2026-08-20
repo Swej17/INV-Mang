@@ -391,6 +391,16 @@ function buildRecords(
  * NEGATIVE net means the order has already been given back more than it ever
  * took, and negating it would post a release that RESERVES — turning a
  * cancellation into a promise of stock.
+ *
+ * Skipping a negative net protects THIS order, not its neighbours. Validation
+ * guards the item's total reserved and never a per-order net, so an
+ * over-released order leaves the item total lower than the orders still
+ * outstanding believe it to be. A neighbouring order's honest, fully-earned
+ * release is then the command that would drive the item's reserved below zero,
+ * and it — not the order that actually overdrew — is the one refused with
+ * InvalidLedgerStateError. Known, and deliberately not fixed here: making a
+ * release answer for its neighbours means reconciling per-order nets against
+ * the item total, which is order-state-machine work rather than ledger work.
  */
 async function outstandingReservations(
   tx: Sql,

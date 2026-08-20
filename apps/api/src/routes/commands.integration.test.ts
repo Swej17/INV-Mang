@@ -485,7 +485,11 @@ describe("command push", () => {
       const claimed = receiveOf(ORG, ITEM, "5");
       await pushCommands(owner, "0", [claimed]);
 
+      // A good command of the stranger's own goes FIRST, so the collision is
+      // mid-batch and something has already committed by the time it fires.
+      const landed = receiveOf(ORG_B, ITEM_B, "8");
       const response = await pushCommands(stranger, "0", [
+        landed,
         { ...claimed, organizationId: ORG_B },
       ]);
 
@@ -494,11 +498,51 @@ describe("command push", () => {
       // result would hand over its entries.
       expect(response.statusCode).toBe(409);
       expect(response.json().commandId).toBe(claimed.commandId);
+      // What already committed is reported, or the client is left exactly as
+      // blind as the 500 this task removed.
+      expect(response.json().accepted.map((entry: { commandId: string }) => entry.commandId)).toEqual(
+        [landed.commandId],
+      );
       const rows = await db.sql`
         SELECT organization_id FROM inventory_ledger_entries WHERE item_id = ${ITEM}
       `;
       expect(rows).toHaveLength(1);
       expect(rows[0]!["organization_id"]).toBe(ORG);
+    });
+
+    it("stops the batch at a stale reserve, leaving later commands unapplied", async () => {
+      const session = await login();
+      await pushCommands(session, "0", [receiveOf(ORG, ITEM, "20")]);
+
+      const stale = reserveOf(ORG, ORDER_A, "0", [{ finishedItemId: ITEM, units: 6 }]);
+      const trailing = receiveOf(ORG, ITEM, "3");
+      const body = (await pushCommands(session, "0", [stale, trailing])).json();
+
+      expect(body.conflicts).toHaveLength(1);
+      expect(body.conflicts[0].code).toBe("REVISION_CHANGED");
+      expect(body.accepted).toEqual([]);
+      // The trailing receipt was queued behind the reservation and may have
+      // been composed on the assumption that it landed, so it must not apply
+      // on its own.
+      expect((await readProjection(session, ITEM)).onHand).toBe("20");
+    });
+
+    it("excuses only what this push has applied, not what its envelope names", async () => {
+      const session = await login();
+      // Another device's receipt, applied in a push of its own.
+      const foreign = receiveOf(ORG, ITEM, "20");
+      await pushCommands(session, "0", [foreign]);
+
+      // The reserve is composed against revision 0, and the envelope lists the
+      // foreign command AFTER it — where this push cannot yet have applied it.
+      // Reading the exemption set from the envelope would let a client excuse
+      // any writer by naming their command ids.
+      const stale = reserveOf(ORG, ORDER_A, "0", [{ finishedItemId: ITEM, units: 6 }]);
+      const body = (await pushCommands(session, "0", [stale, foreign])).json();
+
+      expect(body.conflicts).toHaveLength(1);
+      expect(body.conflicts[0].code).toBe("REVISION_CHANGED");
+      expect((await readProjection(session, ITEM)).reserved).toBe("0");
     });
 
     it("does not treat a batch's own earlier command as a competing writer", async () => {

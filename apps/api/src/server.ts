@@ -148,15 +148,21 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
    * not staleness — this command's own entries are part of the history it
    * would be measured against, and answering an acknowledged command with a
    * conflict would invite the operator to resubmit it under a fresh id and
-   * reserve the same stock twice. Nor are the client's other queued commands:
+   * reserve the same stock twice. Nor is work THIS PUSH has already applied:
    * a batch that receives and then reserves composed both at the same known
    * revision, and counting its own receipt against it would make every mixed
    * offline batch conflict with itself.
+   *
+   * `applied` is what the loop has actually accepted so far, never the ids the
+   * envelope merely claims. Taking it from the envelope would let a client
+   * excuse another device's writes by naming their command ids — including as
+   * replays, which are accepted without posting and so would whitelist a
+   * competing writer at no cost.
    */
   async function firstItemChangedSince(
     organizationId: string,
     command: Extract<InventoryCommand, { type: "order.reserve" }>,
-    batchCommandIds: ReadonlySet<string>,
+    applied: ReadonlySet<string>,
   ): Promise<ProjectionRecord | null> {
     const base = BigInt(command.baseRevision);
     const { locationId } = command.payload;
@@ -168,7 +174,7 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
       // appearing against any line prove the whole command already applied.
       if (history.some((entry) => entry.commandId === command.commandId)) return null;
       const moved = history.some(
-        (entry) => BigInt(entry.revision) > base && !batchCommandIds.has(entry.commandId),
+        (entry) => BigInt(entry.revision) > base && !applied.has(entry.commandId),
       );
       if (moved) return ledger.getProjection(organizationId, line.finishedItemId, locationId);
     }
@@ -255,7 +261,6 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
 
       const accepted: { commandId: string; revision: string; duplicate: boolean }[] = [];
       const conflicts: SyncConflict[] = [];
-      const batchCommandIds = new Set(parsed.data.commands.map((entry) => entry.commandId));
 
       for (const command of parsed.data.commands) {
         // Commands carry the organization they belong to. Trusting that over the
@@ -271,7 +276,7 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
           const stale = await firstItemChangedSince(
             session.organizationId,
             command,
-            batchCommandIds,
+            new Set(accepted.map((entry) => entry.commandId)),
           );
           if (stale) {
             conflicts.push(revisionChangedConflict(command, stale));
@@ -337,7 +342,14 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
             // Integrity failures, not reconcilable divergence: there is no
             // server state the client could rebase this command onto, so a
             // conflict offering it resolutions would be a lie.
-            return reply.code(409).send({ error: error.message, commandId: command.commandId });
+            //
+            // `accepted` rides along because the commands before this one have
+            // already committed. A bare error would leave the client unable to
+            // tell what landed — the failure this task removed from the
+            // availability path, reappearing on a narrower one.
+            return reply
+              .code(409)
+              .send({ error: error.message, commandId: command.commandId, accepted });
           }
           throw error;
         }
