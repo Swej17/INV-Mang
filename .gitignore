@@ -28,3 +28,8 @@ desktop.ini
 .DS_Store
 .vscode/
 .idea/
+
+# A bash `2>NUL` redirect on Windows creates a literal file named NUL
+# instead of discarding output, since NUL there is a reserved device name
+# only cmd.exe understands.
+NUL

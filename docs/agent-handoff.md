@@ -143,11 +143,11 @@ original list were closed in `23b7b42`; the rest keep their meaning, renumbered.
    every migration was a `CREATE TABLE IF NOT EXISTS`; with `0007` and `0008` it
    is not, because both are `ALTER`s that must run once, in order, against an
    already-migrated database. Needed before anything deploys.
-5. **Scaffold portability**: root `typecheck`/`build` call bare `pnpm -r`.
-   Separately, `packages/persistence-contracts` is types-only and its `vitest
-   run` exits 1 with "No test files found", which halts `pnpm -r test` before
-   `application`, `api` or `worker` run. Pre-existing, not caused by the backlog
-   work, but it means the repo has no single command that runs every test.
+5. **Scaffold portability**: root `typecheck`/`build` call bare `pnpm -r`, which
+   fails on a machine without a pnpm shim — use `corepack pnpm` instead. (The
+   other half of this item — `packages/persistence-contracts`'s `vitest run`
+   exiting 1 with "No test files found" and halting `pnpm -r test` — was fixed
+   by adding `--passWithNoTests` to its `test` script; no longer true.)
 6. **`SKIP LOCKED` is not proven load-bearing** in the job runner — plain
    `FOR UPDATE` also yields one winner. The difference is throughput, and
    proving it needs a contention benchmark. Recorded in the test itself.
@@ -155,6 +155,97 @@ original list were closed in `23b7b42`; the rest keep their meaning, renumbered.
    survives: the constraint always exists when 0007 runs. Kept as protection for
    a database where an operator dropped it by hand, which no test can stage.
    Recorded in the test rather than left to look like coverage.
+
+## Findings closed since the last handoff update
+
+An independent full-base review, `review-artifacts/2026-08-19-full-base-review.md`
+(read-only, reviewed at `phase1/integration` @ `cc1525f`), found findings beyond
+what this handoff already tracked. All of the following are now closed:
+
+- **H1** — cross-tenant idempotency lookup not scoped by organization, letting
+  one org's replayed `commandId` return another org's stored result. Closed in
+  `d366c2a`.
+- **H2** — a mid-batch failure 500'd after earlier commands had already
+  committed, and the typed conflict protocol (`SyncConflictV1`) was defined but
+  never used. Closed in `a52153c`.
+- **H3** — `baseRevision` was transported but never checked, so reservations
+  silently degraded to last-write-wins. Closed in `a52153c` (`order.reserve` is
+  gated; signed deltas apply regardless of `baseRevision`, by design — see the
+  `CommandEnvelope` comment).
+- **H4** — ledger validation never checked `reserved ≥ 0` or `incoming ≥ 0`.
+  Closed in `d366c2a`.
+- **H5** — `order.release` threw "not yet applied", and its own comment
+  described a workaround the schema made impossible. Closed in `a52153c`
+  (`releaseOrder` derives the reversal from the order's own reservation
+  history).
+- **M1** — lot override draws were validated only in total, not per draw
+  (negative draws, over-limit draws, and duplicate lot ids all passed). Closed
+  in `5cbe69f`.
+- **M4** — an unparseable instant made `minutesBetween` NaN, and `NaN >
+  threshold` is false, so bad data reported itself as fresh. Closed in
+  `5cbe69f` (a `parseInstant` helper that throws instead of reinterpreting).
+- **M5** — worker leases were never renewed mid-job, so a handler that outlived
+  one lease period got reclaimed and re-run concurrently. Closed in `765b2bc`
+  (heartbeat renewal; see also this update's clamp fix below).
+- **M7** — `/v1/sync/pull` ignored its own contract (hardcoded limit, no
+  `hasMore`). `limit` and `hasMore` are done, closed in `a52153c`. **Still
+  open:** the query is parsed by hand (a regex for `sinceRevision`, `limit`
+  read via `SyncPullRequestV1.shape.limit` alone) rather than through one
+  schema — not counted closed until that's fixed too.
+- **L3** — no `.gitattributes`, mixed LF/CRLF with no normalization policy.
+  Closed in `aab028c`.
+- **L4** — no CI. Closed in `aab028c` (`.github/workflows/ci.yml`).
+- **L5** — `inventory_projections.available` ignores protected stock with no
+  warning to a caller reading the view directly. Closed in `d366c2a` (a
+  `COMMENT ON COLUMN` stating the view's figure is not the domain's `available`).
+
+## Newly parked behaviours
+
+Each of these exists only as a code comment today. Recorded here so the next
+reader does not have to rediscover them from source.
+
+1. **`releaseOrder` release-window scope drop**
+   (`packages/persistence-postgres/src/repositories/postgres-inventory-ledger.ts`,
+   `releaseInTransaction`). A reserve that adds a NEW item/location scope to the
+   order between the outstanding-read and lock acquisition is dropped from that
+   release — the client is told the release succeeded, but that scope's
+   reservation is untouched. Accepted: looping until the read is stable would
+   acquire advisory locks out of sorted order, reintroducing the deadlock risk
+   the sorted-lock design exists to prevent. A later release under a fresh
+   command id picks up what was missed.
+2. **Over-released neighbour**
+   (`postgres-inventory-ledger.ts`, `outstandingReservations`). An order that
+   has been released past its true outstanding total (a negative per-order net)
+   can make a DIFFERENT order's legitimate release fail with
+   `InvalidLedgerStateError`, because validation guards the item's total
+   reserved, not any single order's net. **Not reachable through the sync API
+   today** — no route posts a negative `reservedDelta` carrying `orderId`
+   metadata; `order.release` always derives its delta from stored history.
+   Reaching it needs a direct repository call.
+3. **Advisory revision-gate bypass**
+   (`apps/api/src/server.ts`, `firstItemChangedSince`). A same-org client can
+   exempt an item from the staleness gate by submitting a foreign `commandId`
+   as a replay ahead of a reserve, since `appendOnce`'s duplicate check is keyed
+   on `commandId` + `organizationId` only, not payload equivalence. Accepted:
+   the gate is advisory — `appendOnce`'s availability check is the hard
+   guarantee — and closing it would make legitimate partial-batch retries fail
+   with `REVISION_CHANGED`.
+4. **No clock seam in the ledger repository** — `releaseOrder` mints
+   `occurredAt` itself (`new Date().toISOString()`), with no injection point
+   for tests. `ServerDeps.now` looked like that seam but was never read
+   anywhere; it has been removed rather than wired up, so as not to advertise a
+   determinism seam that doesn't exist.
+
+## CI does not run this branch's strongest new invariants
+
+The 18 shared-contract cases in
+`packages/persistence-contracts/src/inventory-ledger.contract.ts` — including
+every reservation, release, and idempotency case above — run only via
+`postgres-inventory-ledger.integration.test.ts`, which needs real PostgreSQL.
+CI's `Test` step excludes `**/*.integration.test.ts` (see the comment in
+`.github/workflows/ci.yml`), so none of them execute there. They stay
+CI-invisible until backlog item 4 (the migration runner) lands and integration
+tests can run in CI.
 
 ## Conventions worth keeping
 
