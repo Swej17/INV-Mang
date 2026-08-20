@@ -323,6 +323,66 @@ describe("command push", () => {
     expect(rows).toHaveLength(0);
   });
 
+  it("reports an earlier accepted command when a later one is untranslatable", async () => {
+    // The receipt commits before translation throws on the second command, so
+    // a bare 422 would tell the client nothing about what already landed.
+    const session = await login();
+    const receipt = command(ORG);
+    const response = await push(session, {
+      version: 1,
+      deviceId: "d",
+      knownRevision: "0",
+      commands: [
+        receipt,
+        {
+          ...command(ORG),
+          type: "production.complete",
+          payload: {
+            batchId: randomUUID(),
+            recipeVersionId: randomUUID(),
+            locationId: LOCATION,
+            finishedItemId: randomUUID(),
+            finishedUnits: 5,
+            lotOverrides: [],
+          },
+        },
+      ],
+    });
+    expect(response.statusCode).toBe(422);
+    expect(
+      response.json().accepted.map((entry: { commandId: string }) => entry.commandId),
+    ).toEqual([receipt.commandId]);
+    const rows = await db.sql`SELECT id FROM inventory_ledger_entries`;
+    expect(rows).toHaveLength(1);
+  });
+
+  it("audits an early-return push, recording what landed and why it stopped", async () => {
+    // A push that commits a receipt and then hits a hard stop must still leave
+    // a trace: an operator investigating what a device did cannot see a 403
+    // response, and without this the ledger write would be the only evidence.
+    const session = await login("OWNER_ADMIN", ORG);
+    const receipt = command(ORG);
+    const response = await push(session, {
+      version: 1,
+      deviceId: "d",
+      knownRevision: "0",
+      commands: [receipt, command(ORG_B)],
+    });
+    expect(response.statusCode).toBe(403);
+
+    const rows = await db.sql`
+      SELECT detail FROM audit_events WHERE kind = 'sync.push' ORDER BY occurred_at DESC LIMIT 1
+    `;
+    expect(rows).toHaveLength(1);
+    const detail = rows[0]!["detail"] as {
+      commandIds: string[];
+      stopReason: string;
+      stoppedCommandId: string;
+    };
+    expect(detail.commandIds).toEqual([receipt.commandId]);
+    expect(detail.stopReason).toBe("organization_mismatch");
+  });
+
   it("refuses a command belonging to another organization", async () => {
     // Trusting the command's organization over the session would let a client
     // write into someone else's data.

@@ -262,11 +262,40 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
       const accepted: { commandId: string; revision: string; duplicate: boolean }[] = [];
       const conflicts: SyncConflict[] = [];
 
+      /**
+       * Record what landed and why the batch stopped, then send the response.
+       *
+       * Every early return below shares this instead of calling `recordAudit`
+       * ad hoc: a push that committed entries and then hit a 409/422/403 must
+       * leave the same trace in `audit_events` as one that ran to completion,
+       * or the early-return paths are invisible to an operator investigating
+       * what a device actually did.
+       */
+      async function stopPush(
+        code: number,
+        body: unknown,
+        stopReason: string | null,
+        stoppedCommandId?: string,
+      ) {
+        await recordAudit(session.organizationId, session.userId, String(request.id), "sync.push", {
+          commandIds: accepted.map((entry) => entry.commandId),
+          conflicts: conflicts.map((conflict) => ({ commandId: conflict.commandId, code: conflict.code })),
+          stopReason,
+          ...(stoppedCommandId ? { stoppedCommandId } : {}),
+        });
+        return reply.code(code).send(body);
+      }
+
       for (const command of parsed.data.commands) {
         // Commands carry the organization they belong to. Trusting that over the
         // session would let a client write into someone else's data.
         if (command.organizationId !== session.organizationId) {
-          return reply.code(403).send({ error: "command organization does not match session" });
+          return stopPush(
+            403,
+            { error: "command organization does not match session", commandId: command.commandId, accepted },
+            "organization_mismatch",
+            command.commandId,
+          );
         }
 
         // Optimistic concurrency, for reservations only. A receipt or an
@@ -305,10 +334,12 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
           } catch (error) {
             // An untranslatable command must fail loudly. Accepting it and posting
             // nothing would tell the client its mutation landed when it did not.
-            return reply.code(422).send({
-              error: (error as Error).message,
-              commandId: command.commandId,
-            });
+            return stopPush(
+              422,
+              { error: (error as Error).message, commandId: command.commandId, accepted },
+              "untranslatable_command",
+              command.commandId,
+            );
           }
           apply = () => ledger.appendOnce(command.commandId, session.organizationId, entries);
         }
@@ -347,29 +378,18 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
             // already committed. A bare error would leave the client unable to
             // tell what landed — the failure this task removed from the
             // availability path, reappearing on a narrower one.
-            return reply
-              .code(409)
-              .send({ error: error.message, commandId: command.commandId, accepted });
+            return stopPush(
+              409,
+              { error: error.message, commandId: command.commandId, accepted },
+              error instanceof CommandIdCollisionError
+                ? "command_id_collision"
+                : "invalid_ledger_state",
+              command.commandId,
+            );
           }
           throw error;
         }
       }
-
-      await recordAudit(
-        session.organizationId,
-        session.userId,
-        String(request.id),
-        "sync.push",
-        {
-          commandIds: accepted.map((entry) => entry.commandId),
-          // Recorded separately: a push that reports only what landed leaves no
-          // trace of what was refused or why.
-          conflicts: conflicts.map((conflict) => ({
-            commandId: conflict.commandId,
-            code: conflict.code,
-          })),
-        },
-      );
 
       const revisions = accepted.map((entry) => BigInt(entry.revision));
       const serverRevision =
@@ -378,9 +398,14 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
           : parsed.data.knownRevision;
 
       // Always 200 once the envelope parsed: a conflict is a reportable outcome
-      // the client can act on, not a failure of the request.
-      return reply.code(200).send(
+      // the client can act on, not a failure of the request. A conflict still
+      // stopped the batch early in the same sense as a 409/422/403 above, so it
+      // gets a stop reason in the audit trail rather than reading as a plain
+      // completion.
+      return stopPush(
+        200,
         SyncPushResultV1.parse({ version: 1, serverRevision, accepted, conflicts }),
+        conflicts.length > 0 ? "conflict" : null,
       );
     },
   );
