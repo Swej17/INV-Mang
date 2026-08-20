@@ -77,13 +77,13 @@ export function translateCommand(command: InventoryCommand): readonly LedgerEntr
       }));
 
     case "order.release":
-      // Release carries no lines: the caller supplies the reversal amounts via
-      // a follow-up reserve command with negative units, so this records intent
-      // only. Fully resolving a release needs the order's reservation history,
-      // which arrives with Task 8's order state machine.
-      throw new Error(
-        "order.release requires reservation history and is not yet applied by the API",
-      );
+      // Release is applied by the sync route through the repository's
+      // releaseOrder, which derives the reversal amounts from the order's own
+      // reservation history — history a pure translation cannot read. Reaching
+      // this line means a second call site bypassed the route, and posting
+      // nothing there would tell the client its release landed while the
+      // reservation still suppressed availability.
+      throw new Error("order.release is applied by the route, not translated");
 
     case "production.complete":
       // Production is applied through CompleteProductionBatch, which needs the

@@ -42,6 +42,9 @@ class FakeLedger implements InventoryLedgerRepository {
     this.appended.push({ commandId, entries });
     return { revision: String(this.appended.length), duplicate: false, entries: [] };
   }
+  async releaseOrder(): Promise<AppendResult> {
+    throw new Error("not used");
+  }
   async getProjection(): Promise<ProjectionRecord> {
     throw new Error("not used");
   }

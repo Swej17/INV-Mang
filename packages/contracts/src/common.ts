@@ -37,6 +37,16 @@ export const QuantitySchema = z.object({
  * result rather than posting a second ledger entry. `baseRevision` is what the
  * client believed when it composed the command, which is what makes optimistic
  * concurrency detectable instead of silently last-write-wins.
+ *
+ * `baseRevision` is enforced for `order.reserve` ONLY, and a stale one comes
+ * back as a REVISION_CHANGED conflict. A reservation's meaning depends on the
+ * availability the client observed, so a figure taken from state that has since
+ * moved cannot be honoured as intent. `inventory.receive` and
+ * `inventory.adjust` are signed deltas against whatever the server holds —
+ * "three more arrived" is true regardless of what else changed — so they
+ * deliberately apply no matter how far behind the client was. The field is
+ * still carried on every command: it is the client's read watermark, and the
+ * server records it whether or not that command type gates on it.
  */
 export const CommandEnvelope = z.object({
   version: z.literal(1),

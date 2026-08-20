@@ -1,7 +1,22 @@
 import { randomUUID } from "node:crypto";
 
 import cookie from "@fastify/cookie";
-import { InventoryCommandV1, SyncPushRequestV1, SyncPushResultV1 } from "@simple-flame/contracts";
+import {
+  InventoryCommandV1,
+  SyncPullRequestV1,
+  SyncPushRequestV1,
+  SyncPushResultV1,
+  type InventoryCommand,
+  type SyncConflict,
+} from "@simple-flame/contracts";
+import {
+  CommandIdCollisionError,
+  InsufficientAvailableError,
+  InvalidLedgerStateError,
+  type AppendResult,
+  type LedgerEntryDraft,
+  type ProjectionRecord,
+} from "@simple-flame/persistence-contracts";
 import { PostgresInventoryLedgerRepository } from "@simple-flame/persistence-postgres";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import type { Sql } from "postgres";
@@ -66,6 +81,48 @@ export function redact(value: unknown, depth = 0): unknown {
   return output;
 }
 
+/**
+ * What an operator may do about a command the server refused.
+ *
+ * COMPENSATE_LOCAL is deliberately absent from both refusals below: neither
+ * posted anything, so there is nothing to compensate for. Either the operator
+ * accepts server state, or they rebase the command and send it again.
+ */
+const REFUSED_COMMAND_RESOLUTIONS = ["KEEP_SERVER", "EDIT_AND_RESUBMIT"] as const;
+
+function insufficientConflict(
+  command: InventoryCommand,
+  snapshot: ProjectionRecord,
+): SyncConflict {
+  return {
+    commandId: command.commandId,
+    code: "INSUFFICIENT_AVAILABLE",
+    serverSnapshot: snapshot,
+    // The command itself, verbatim. A conflict that dropped what the operator
+    // meant would discard their work under the guise of reporting it.
+    localIntent: command,
+    allowedResolutions: [...REFUSED_COMMAND_RESOLUTIONS],
+    // Phrased from the snapshot rather than from the error's `requested`, which
+    // is a sentinel word on the negative-on-hand branch and would read as a
+    // quantity here.
+    explanation: `${command.type} would leave item ${snapshot.itemId} at ${snapshot.locationId} short: on hand ${snapshot.onHand}, reserved ${snapshot.reserved}, available ${snapshot.available}.`,
+  };
+}
+
+function revisionChangedConflict(
+  command: InventoryCommand,
+  snapshot: ProjectionRecord,
+): SyncConflict {
+  return {
+    commandId: command.commandId,
+    code: "REVISION_CHANGED",
+    serverSnapshot: snapshot,
+    localIntent: command,
+    allowedResolutions: [...REFUSED_COMMAND_RESOLUTIONS],
+    explanation: `Item ${snapshot.itemId} at ${snapshot.locationId} is at revision ${snapshot.revision}; the command was composed against ${command.baseRevision}.`,
+  };
+}
+
 export type ServerDeps = Readonly<{
   sql: Sql;
   sessions: SessionStore;
@@ -78,6 +135,45 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   await app.register(cookie);
 
   const ledger = new PostgresInventoryLedgerRepository(deps.sql);
+
+  /**
+   * A reservation the client composed against stock that has since moved, or
+   * null if its belief still holds.
+   *
+   * Advisory: the appendOnce availability check remains the hard guarantee.
+   * This exists so a stale client is told its reservation was refused because
+   * the world changed, rather than silently consuming stock it never saw.
+   *
+   * Two things deliberately do NOT count as the world changing. A replay is
+   * not staleness — this command's own entries are part of the history it
+   * would be measured against, and answering an acknowledged command with a
+   * conflict would invite the operator to resubmit it under a fresh id and
+   * reserve the same stock twice. Nor are the client's other queued commands:
+   * a batch that receives and then reserves composed both at the same known
+   * revision, and counting its own receipt against it would make every mixed
+   * offline batch conflict with itself.
+   */
+  async function firstItemChangedSince(
+    organizationId: string,
+    command: Extract<InventoryCommand, { type: "order.reserve" }>,
+    batchCommandIds: ReadonlySet<string>,
+  ): Promise<ProjectionRecord | null> {
+    const base = BigInt(command.baseRevision);
+    const { locationId } = command.payload;
+    for (const line of command.payload.lines) {
+      const history = (await ledger.listEntries(organizationId, line.finishedItemId)).filter(
+        (entry) => entry.locationId === locationId,
+      );
+      // The command posts to every line in one transaction, so its entries
+      // appearing against any line prove the whole command already applied.
+      if (history.some((entry) => entry.commandId === command.commandId)) return null;
+      const moved = history.some(
+        (entry) => BigInt(entry.revision) > base && !batchCommandIds.has(entry.commandId),
+      );
+      if (moved) return ledger.getProjection(organizationId, line.finishedItemId, locationId);
+    }
+    return null;
+  }
 
   async function recordAudit(
     organizationId: string,
@@ -158,33 +254,93 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
       }
 
       const accepted: { commandId: string; revision: string; duplicate: boolean }[] = [];
+      const conflicts: SyncConflict[] = [];
+      const batchCommandIds = new Set(parsed.data.commands.map((entry) => entry.commandId));
+
       for (const command of parsed.data.commands) {
         // Commands carry the organization they belong to. Trusting that over the
         // session would let a client write into someone else's data.
         if (command.organizationId !== session.organizationId) {
           return reply.code(403).send({ error: "command organization does not match session" });
         }
-        let entries;
-        try {
-          entries = translateCommand(command);
-        } catch (error) {
-          // An untranslatable command must fail loudly. Accepting it and posting
-          // nothing would tell the client its mutation landed when it did not.
-          return reply.code(422).send({
-            error: (error as Error).message,
-            commandId: command.commandId,
-          });
+
+        // Optimistic concurrency, for reservations only. A receipt or an
+        // adjustment is a signed delta whose meaning does not depend on what
+        // the client observed, so both apply regardless of baseRevision.
+        if (command.type === "order.reserve") {
+          const stale = await firstItemChangedSince(
+            session.organizationId,
+            command,
+            batchCommandIds,
+          );
+          if (stale) {
+            conflicts.push(revisionChangedConflict(command, stale));
+            break;
+          }
         }
-        const result = await ledger.appendOnce(
-          command.commandId,
-          session.organizationId,
-          entries,
-        );
-        accepted.push({
-          commandId: command.commandId,
-          revision: result.revision,
-          duplicate: result.duplicate,
-        });
+
+        // Release is applied from the order's own reservation history, which a
+        // pure translation cannot read; every other command maps to ledger
+        // entries before it reaches the repository.
+        let apply: () => Promise<AppendResult>;
+        if (command.type === "order.release") {
+          const { orderId, locationId, reason } = command.payload;
+          apply = () =>
+            ledger.releaseOrder(
+              command.commandId,
+              session.organizationId,
+              orderId,
+              locationId,
+              reason,
+            );
+        } else {
+          let entries: readonly LedgerEntryDraft[];
+          try {
+            entries = translateCommand(command);
+          } catch (error) {
+            // An untranslatable command must fail loudly. Accepting it and posting
+            // nothing would tell the client its mutation landed when it did not.
+            return reply.code(422).send({
+              error: (error as Error).message,
+              commandId: command.commandId,
+            });
+          }
+          apply = () => ledger.appendOnce(command.commandId, session.organizationId, entries);
+        }
+
+        try {
+          const result = await apply();
+          accepted.push({
+            commandId: command.commandId,
+            revision: result.revision,
+            duplicate: result.duplicate,
+          });
+        } catch (error) {
+          if (error instanceof InsufficientAvailableError) {
+            conflicts.push(
+              insufficientConflict(
+                command,
+                await ledger.getProjection(
+                  session.organizationId,
+                  error.itemId,
+                  error.locationId,
+                ),
+              ),
+            );
+            // Stop the batch at the first conflict. Commands queued after this
+            // one may have been composed on the assumption that it applied, so
+            // applying them anyway would build on an intent that never landed.
+            // They appear in neither list and the client resubmits them.
+            break;
+          }
+          if (error instanceof CommandIdCollisionError || error instanceof InvalidLedgerStateError) {
+            // Integrity failures, not reconcilable divergence: there is no
+            // server state the client could rebase this command onto, so a
+            // conflict offering it resolutions would be a lie.
+            return reply.code(409).send({ error: error.message, commandId: command.commandId });
+          }
+          throw error;
+        }
       }
 
       await recordAudit(
@@ -192,7 +348,15 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
         session.userId,
         String(request.id),
         "sync.push",
-        { commandIds: accepted.map((entry) => entry.commandId) },
+        {
+          commandIds: accepted.map((entry) => entry.commandId),
+          // Recorded separately: a push that reports only what landed leaves no
+          // trace of what was refused or why.
+          conflicts: conflicts.map((conflict) => ({
+            commandId: conflict.commandId,
+            code: conflict.code,
+          })),
+        },
       );
 
       const revisions = accepted.map((entry) => BigInt(entry.revision));
@@ -201,18 +365,37 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
           ? revisions.reduce((highest, current) => (current > highest ? current : highest)).toString()
           : parsed.data.knownRevision;
 
+      // Always 200 once the envelope parsed: a conflict is a reportable outcome
+      // the client can act on, not a failure of the request.
       return reply.code(200).send(
-        SyncPushResultV1.parse({ version: 1, serverRevision, accepted, conflicts: [] }),
+        SyncPushResultV1.parse({ version: 1, serverRevision, accepted, conflicts }),
       );
     },
   );
 
   app.get("/v1/sync/pull", { preHandler: [requireSession] }, async (request, reply) => {
     const session = request.session!;
-    const since = String((request.query as Record<string, unknown>)["sinceRevision"] ?? "0");
+    const query = request.query as Record<string, unknown>;
+    const since = String(query["sinceRevision"] ?? "0");
     if (!/^\d+$/.test(since)) {
       return reply.code(422).send({ error: "sinceRevision must be a whole number" });
     }
+    // Bounds and default come from the contract rather than being restated
+    // here: a route that allowed a page the schema forbids would be a second
+    // definition of the protocol, free to drift from the published one.
+    const requested = query["limit"];
+    const parsedLimit = SyncPullRequestV1.shape.limit.safeParse(
+      requested === undefined ? undefined : Number(String(requested)),
+    );
+    if (!parsedLimit.success) {
+      return reply
+        .code(422)
+        .send({ error: "invalid limit", issues: parsedLimit.error.issues });
+    }
+    const limit = parsedLimit.data;
+    // One more row than asked for, so a full page can be told apart from the
+    // last page. Without that signal a client whose entries land exactly on the
+    // boundary cannot know whether to come back.
     const rows = await deps.sql`
       SELECT id, item_id, location_id, cause,
              on_hand_delta::text, reserved_delta::text, incoming_delta::text,
@@ -220,9 +403,11 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
       FROM inventory_ledger_entries
       WHERE organization_id = ${session.organizationId} AND revision > ${since}::bigint
       ORDER BY revision ASC
-      LIMIT 500
+      LIMIT ${limit + 1}
     `;
-    return reply.code(200).send({ version: 1, entries: rows });
+    return reply
+      .code(200)
+      .send({ version: 1, entries: rows.slice(0, limit), hasMore: rows.length > limit });
   });
 
   app.get("/v1/read/projection", { preHandler: [requireSession] }, async (request, reply) => {

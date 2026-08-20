@@ -19,7 +19,10 @@ import { buildServer, redact } from "../server.js";
 const ORG = "0199a1f0-0000-7000-8000-000000000001";
 const ORG_B = "0199a1f0-0000-7000-8000-0000000000b0";
 const ITEM = "0199a1f0-0000-7000-8000-000000000004";
+const ITEM_B = "0199a1f0-0000-7000-8000-000000000006";
 const LOCATION = "0199a1f0-0000-7000-8000-000000000005";
+const ORDER_A = "0199a1f0-0000-7000-8000-00000000000a";
+const ORDER_B = "0199a1f0-0000-7000-8000-00000000000b";
 
 function migrationSql(name: string): string {
   return readFileSync(
@@ -51,16 +54,22 @@ async function login(role = "OWNER_ADMIN", organizationId = ORG) {
   return { userId, organizationId, ...issued };
 }
 
-function command(organizationId: string) {
+function envelope(organizationId: string, baseRevision = "0") {
   return {
     version: 1 as const,
     commandId: randomUUID(),
     organizationId,
     actorId: randomUUID(),
     deviceId: "workshop-laptop",
-    baseRevision: "0",
+    baseRevision,
     occurredAtLocal: "2026-08-16T12:00:00.000Z",
     queuedAt: "2026-08-16T12:00:01.000Z",
+  };
+}
+
+function command(organizationId: string) {
+  return {
+    ...envelope(organizationId),
     type: "inventory.receive" as const,
     payload: {
       itemId: ITEM,
@@ -68,6 +77,45 @@ function command(organizationId: string) {
       quantity: { value: "4535.9237", unit: "GRAM" as const },
       lot: null,
     },
+  };
+}
+
+/**
+ * Receipts for the reservation tests are counted in EACH, so an on-hand figure
+ * and a reservation's `units` are the same kind of number. Grams against units
+ * would still project arithmetically and hide a mistaken quantity.
+ */
+function receiveOf(organizationId: string, itemId: string, units: string) {
+  return {
+    ...envelope(organizationId),
+    type: "inventory.receive" as const,
+    payload: {
+      itemId,
+      locationId: LOCATION,
+      quantity: { value: units, unit: "EACH" as const },
+      lot: null,
+    },
+  };
+}
+
+function reserveOf(
+  organizationId: string,
+  orderId: string,
+  baseRevision: string,
+  lines: readonly { finishedItemId: string; units: number }[],
+) {
+  return {
+    ...envelope(organizationId, baseRevision),
+    type: "order.reserve" as const,
+    payload: { orderId, locationId: LOCATION, lines },
+  };
+}
+
+function releaseOf(organizationId: string, orderId: string, reason: string) {
+  return {
+    ...envelope(organizationId),
+    type: "order.release" as const,
+    payload: { orderId, locationId: LOCATION, reason },
   };
 }
 
@@ -300,6 +348,370 @@ describe("command push", () => {
     const rows = await db.sql`SELECT kind, request_id FROM audit_events WHERE kind = 'sync.push'`;
     expect(rows).toHaveLength(1);
     expect(rows[0]!["request_id"]).toBeTruthy();
+  });
+
+  async function pushCommands(
+    session: Awaited<ReturnType<typeof login>>,
+    knownRevision: string,
+    commands: readonly unknown[],
+  ) {
+    return push(session, { version: 1, deviceId: "workshop-laptop", knownRevision, commands });
+  }
+
+  async function readProjection(session: Awaited<ReturnType<typeof login>>, itemId: string) {
+    const response = await app.inject({
+      method: "GET",
+      url: `/v1/read/projection?itemId=${itemId}&locationId=${LOCATION}`,
+      cookies: { [SESSION_COOKIE]: session.cookieValue },
+    });
+    return response.json();
+  }
+
+  describe("conflicts", () => {
+    it("returns insufficient availability as a typed conflict, not a 500", async () => {
+      const session = await login();
+      const seeded = await pushCommands(session, "0", [receiveOf(ORG, ITEM, "5")]);
+      const knownRevision = seeded.json().serverRevision;
+
+      const receiveThree = receiveOf(ORG, ITEM, "3");
+      const reserveHundred = reserveOf(ORG, ORDER_A, knownRevision, [
+        { finishedItemId: ITEM, units: 100 },
+      ]);
+      const receiveOne = receiveOf(ORG, ITEM, "1");
+
+      const response = await pushCommands(session, knownRevision, [
+        receiveThree,
+        reserveHundred,
+        receiveOne,
+      ]);
+
+      // A mid-batch conflict is a reportable outcome, not a server fault: the
+      // earlier command has already committed and the client needs to be told
+      // exactly which one of the three it must decide about.
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.accepted.map((entry: { commandId: string }) => entry.commandId)).toEqual([
+        receiveThree.commandId,
+      ]);
+      expect(body.conflicts).toHaveLength(1);
+      expect(body.conflicts[0].code).toBe("INSUFFICIENT_AVAILABLE");
+      expect(body.conflicts[0].commandId).toBe(reserveHundred.commandId);
+      expect(body.conflicts[0].localIntent.commandId).toBe(reserveHundred.commandId);
+      expect(body.conflicts[0].localIntent.payload.lines[0].units).toBe(100);
+      expect(body.conflicts[0].serverSnapshot).toMatchObject({
+        itemId: ITEM,
+        onHand: "8",
+        reserved: "0",
+        available: "8",
+      });
+      expect(body.conflicts[0].allowedResolutions).toEqual(["KEEP_SERVER", "EDIT_AND_RESUBMIT"]);
+
+      // The command queued AFTER the conflict must not have applied: it may
+      // have been composed on the assumption that the reservation landed.
+      const projection = await readProjection(session, ITEM);
+      expect(projection.onHand).toBe("8");
+      expect(projection.reserved).toBe("0");
+    });
+
+    it("refuses a stale reserve with REVISION_CHANGED", async () => {
+      const session = await login();
+      const seeded = await pushCommands(session, "0", [receiveOf(ORG, ITEM, "20")]);
+      const currentRevision = seeded.json().serverRevision;
+
+      // Affordable on purpose — 6 of 20 fits. A refusal therefore proves the
+      // revision gate fired, not availability wearing the wrong conflict code.
+      const stale = reserveOf(ORG, ORDER_A, "0", [{ finishedItemId: ITEM, units: 6 }]);
+      const staleBody = (await pushCommands(session, "0", [stale])).json();
+      expect(staleBody.conflicts).toHaveLength(1);
+      expect(staleBody.conflicts[0].code).toBe("REVISION_CHANGED");
+      expect(staleBody.conflicts[0].commandId).toBe(stale.commandId);
+      expect(staleBody.accepted).toEqual([]);
+      expect((await readProjection(session, ITEM)).reserved).toBe("0");
+
+      const fresh = reserveOf(ORG, ORDER_B, currentRevision, [
+        { finishedItemId: ITEM, units: 6 },
+      ]);
+      const freshBody = (await pushCommands(session, currentRevision, [fresh])).json();
+      expect(freshBody.conflicts).toEqual([]);
+      expect((await readProjection(session, ITEM)).reserved).toBe("6");
+    });
+
+    it("applies a signed delta whose baseRevision is stale, and says so", async () => {
+      // The design decision H3 records: a receipt means "three more arrived",
+      // which is true whatever else moved, so it must NOT be gated. Only a
+      // reservation depends on the availability the client observed.
+      const session = await login();
+      await pushCommands(session, "0", [receiveOf(ORG, ITEM, "7")]);
+
+      const behind = receiveOf(ORG, ITEM, "2");
+      const body = (await pushCommands(session, "0", [behind])).json();
+
+      expect(body.conflicts).toEqual([]);
+      expect(body.accepted).toHaveLength(1);
+      expect((await readProjection(session, ITEM)).onHand).toBe("9");
+    });
+
+    it("reports an over-large adjustment as a conflict, not only reservations", async () => {
+      const session = await login();
+      const knownRevision = (
+        await pushCommands(session, "0", [receiveOf(ORG, ITEM, "6")])
+      ).json().serverRevision;
+
+      // A recount that would drive on-hand to -3: reconcilable divergence, the
+      // operator counted against state that has moved, not a server fault.
+      const adjust = {
+        ...envelope(ORG, knownRevision),
+        type: "inventory.adjust" as const,
+        payload: {
+          itemId: ITEM,
+          locationId: LOCATION,
+          delta: { value: "-9", unit: "EACH" as const },
+          reasonCode: "PHYSICAL_COUNT" as const,
+          note: null,
+        },
+      };
+      const body = (await pushCommands(session, knownRevision, [adjust])).json();
+
+      expect(body.conflicts).toHaveLength(1);
+      expect(body.conflicts[0].code).toBe("INSUFFICIENT_AVAILABLE");
+      expect(body.conflicts[0].serverSnapshot.onHand).toBe("6");
+      expect(body.conflicts[0].explanation).toContain("inventory.adjust");
+      expect((await readProjection(session, ITEM)).onHand).toBe("6");
+    });
+
+    it("answers a command id another organization already used with 409", async () => {
+      const owner = await login("OWNER_ADMIN", ORG);
+      const stranger = await login("OWNER_ADMIN", ORG_B);
+      const claimed = receiveOf(ORG, ITEM, "5");
+      await pushCommands(owner, "0", [claimed]);
+
+      const response = await pushCommands(stranger, "0", [
+        { ...claimed, organizationId: ORG_B },
+      ]);
+
+      // An integrity failure, not reconcilable divergence: there is no server
+      // state the stranger could rebase onto, and replaying the owner's stored
+      // result would hand over its entries.
+      expect(response.statusCode).toBe(409);
+      expect(response.json().commandId).toBe(claimed.commandId);
+      const rows = await db.sql`
+        SELECT organization_id FROM inventory_ledger_entries WHERE item_id = ${ITEM}
+      `;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!["organization_id"]).toBe(ORG);
+    });
+
+    it("does not treat a batch's own earlier command as a competing writer", async () => {
+      // A device that queues a receipt and a reservation together composed both
+      // at the same known revision. Counting its own receipt as somebody else's
+      // change would make every mixed offline batch conflict with itself.
+      const session = await login();
+      const body = (
+        await pushCommands(session, "0", [
+          receiveOf(ORG, ITEM, "12"),
+          reserveOf(ORG, ORDER_A, "0", [{ finishedItemId: ITEM, units: 9 }]),
+        ])
+      ).json();
+
+      expect(body.conflicts).toEqual([]);
+      expect(body.accepted).toHaveLength(2);
+      expect((await readProjection(session, ITEM)).reserved).toBe("9");
+    });
+
+    it("reports a replayed reserve as a duplicate rather than a conflict", async () => {
+      const session = await login();
+      const seeded = await pushCommands(session, "0", [receiveOf(ORG, ITEM, "15")]);
+      const knownRevision = seeded.json().serverRevision;
+      const reserve = reserveOf(ORG, ORDER_A, knownRevision, [
+        { finishedItemId: ITEM, units: 5 },
+      ]);
+
+      const first = await pushCommands(session, knownRevision, [reserve]);
+      // Another device moves the same item before the retry lands, so the item
+      // genuinely IS past the retry's baseRevision. Idempotency still outranks
+      // staleness: the command already applied, and answering it with a
+      // conflict would invite the operator to resubmit it under a fresh id and
+      // reserve the stock twice.
+      await pushCommands(session, knownRevision, [receiveOf(ORG, ITEM, "2")]);
+      const second = await pushCommands(session, knownRevision, [reserve]);
+
+      expect(first.json().accepted[0].duplicate).toBe(false);
+      expect(second.json().conflicts).toEqual([]);
+      expect(second.json().accepted[0].duplicate).toBe(true);
+      expect(second.json().accepted[0].revision).toBe(first.json().accepted[0].revision);
+      expect((await readProjection(session, ITEM)).reserved).toBe("5");
+    });
+  });
+
+  describe("order release", () => {
+    /** Reserve two items under order A and one under order B, then release A. */
+    async function seedReservations(session: Awaited<ReturnType<typeof login>>) {
+      const seeded = await pushCommands(session, "0", [
+        receiveOf(ORG, ITEM, "20"),
+        receiveOf(ORG, ITEM_B, "30"),
+      ]);
+      const afterReceipts = seeded.json().serverRevision;
+
+      const reservedA = await pushCommands(session, afterReceipts, [
+        reserveOf(ORG, ORDER_A, afterReceipts, [
+          { finishedItemId: ITEM, units: 4 },
+          { finishedItemId: ITEM_B, units: 6 },
+        ]),
+      ]);
+      const afterA = reservedA.json().serverRevision;
+
+      await pushCommands(session, afterA, [
+        reserveOf(ORG, ORDER_B, afterA, [{ finishedItemId: ITEM, units: 7 }]),
+      ]);
+      return afterA;
+    }
+
+    it("releases exactly the outstanding reservation for the named order", async () => {
+      const session = await login();
+      await seedReservations(session);
+      expect((await readProjection(session, ITEM)).reserved).toBe("11");
+
+      const body = (await pushCommands(session, "0", [
+        releaseOf(ORG, ORDER_A, "CANCELLED"),
+      ])).json();
+      expect(body.conflicts).toEqual([]);
+      expect(body.accepted[0].duplicate).toBe(false);
+
+      // Order B's 7 is untouched: a release names an order, not an item.
+      expect((await readProjection(session, ITEM)).reserved).toBe("7");
+      expect((await readProjection(session, ITEM_B)).reserved).toBe("0");
+
+      const rows = await db.sql`
+        SELECT item_id, reserved_delta::text, metadata
+        FROM inventory_ledger_entries
+        WHERE cause = 'RESERVATION_RELEASE'
+        ORDER BY item_id ASC
+      `;
+      expect(rows).toHaveLength(2);
+      expect(rows.map((row) => [row["item_id"], row["reserved_delta"]])).toEqual([
+        [ITEM, "-4.00000000"],
+        [ITEM_B, "-6.00000000"],
+      ]);
+      expect(rows[0]!["metadata"]).toEqual({ orderId: ORDER_A, reason: "CANCELLED" });
+    });
+
+    it("treats a second release of the same order as a no-op, not a double release", async () => {
+      const session = await login();
+      await seedReservations(session);
+      await pushCommands(session, "0", [releaseOf(ORG, ORDER_A, "CANCELLED")]);
+
+      // A DIFFERENT command id, so idempotency cannot be what saves this: the
+      // order simply has nothing outstanding left to release.
+      const body = (await pushCommands(session, "0", [
+        releaseOf(ORG, ORDER_A, "SUPERSEDED"),
+      ])).json();
+      expect(body.conflicts).toEqual([]);
+      expect(body.accepted[0].duplicate).toBe(false);
+
+      expect((await readProjection(session, ITEM)).reserved).toBe("7");
+      expect((await readProjection(session, ITEM_B)).reserved).toBe("0");
+      const rows = await db.sql`
+        SELECT id FROM inventory_ledger_entries WHERE cause = 'RESERVATION_RELEASE'
+      `;
+      expect(rows).toHaveLength(2);
+    });
+
+    it("replays a release under the same command id without posting again", async () => {
+      const session = await login();
+      await seedReservations(session);
+      const release = releaseOf(ORG, ORDER_A, "REFUNDED");
+
+      const first = (await pushCommands(session, "0", [release])).json();
+      const second = (await pushCommands(session, "0", [release])).json();
+
+      expect(first.accepted[0].duplicate).toBe(false);
+      expect(second.accepted[0].duplicate).toBe(true);
+      expect(second.accepted[0].revision).toBe(first.accepted[0].revision);
+      expect((await readProjection(session, ITEM)).reserved).toBe("7");
+      const rows = await db.sql`
+        SELECT id FROM inventory_ledger_entries WHERE cause = 'RESERVATION_RELEASE'
+      `;
+      expect(rows).toHaveLength(2);
+    });
+
+    it("records a release for an order that never reserved anything", async () => {
+      const session = await login();
+      const body = (await pushCommands(session, "0", [
+        releaseOf(ORG, ORDER_B, "FULFILLED"),
+      ])).json();
+
+      // An empty release is a legitimate no-op — the client cannot know the
+      // order held nothing — so it is accepted and recorded, not refused.
+      expect(body.accepted).toHaveLength(1);
+      expect(body.conflicts).toEqual([]);
+      const rows = await db.sql`SELECT id FROM inventory_ledger_entries`;
+      expect(rows).toHaveLength(0);
+    });
+  });
+});
+
+describe("sync pull", () => {
+  async function seedEntries(session: Awaited<ReturnType<typeof login>>, count: number) {
+    await app.inject({
+      method: "POST",
+      url: "/v1/sync/push",
+      cookies: { [SESSION_COOKIE]: session.cookieValue },
+      headers: { [CSRF_HEADER]: session.csrfToken },
+      payload: {
+        version: 1,
+        deviceId: "workshop-laptop",
+        knownRevision: "0",
+        commands: Array.from({ length: count }, () => command(ORG)),
+      } as never,
+    });
+  }
+
+  async function pull(session: Awaited<ReturnType<typeof login>>, query: string) {
+    return app.inject({
+      method: "GET",
+      url: `/v1/sync/pull?${query}`,
+      cookies: { [SESSION_COOKIE]: session.cookieValue },
+    });
+  }
+
+  it("flips hasMore at the page boundary", async () => {
+    const session = await login();
+    await seedEntries(session, 4);
+
+    const short = await pull(session, "sinceRevision=0&limit=3");
+    expect(short.json().entries).toHaveLength(3);
+    // Four entries and a page of three: the client must be told to come back.
+    expect(short.json().hasMore).toBe(true);
+
+    const exact = await pull(session, "sinceRevision=0&limit=4");
+    expect(exact.json().entries).toHaveLength(4);
+    // A full page that happens to be the last one must not read as "more".
+    expect(exact.json().hasMore).toBe(false);
+  });
+
+  it("continues from the last revision of the previous page", async () => {
+    const session = await login();
+    await seedEntries(session, 4);
+
+    const first = await pull(session, "sinceRevision=0&limit=3");
+    const cursor = first.json().entries[2].revision;
+    const second = await pull(session, `sinceRevision=${cursor}&limit=3`);
+
+    expect(second.json().entries).toHaveLength(1);
+    expect(second.json().hasMore).toBe(false);
+    // No overlap and no gap across the seam.
+    const revisions = [...first.json().entries, ...second.json().entries].map(
+      (entry: { revision: string }) => entry.revision,
+    );
+    expect(new Set(revisions).size).toBe(4);
+  });
+
+  it("rejects a limit outside the contract's range", async () => {
+    const session = await login();
+    expect((await pull(session, "sinceRevision=0&limit=0")).statusCode).toBe(422);
+    expect((await pull(session, "sinceRevision=0&limit=1001")).statusCode).toBe(422);
+    expect((await pull(session, "sinceRevision=0&limit=ten")).statusCode).toBe(422);
+    expect((await pull(session, "sinceRevision=0&limit=1000")).statusCode).toBe(200);
   });
 });
 

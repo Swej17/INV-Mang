@@ -30,6 +30,9 @@ export function runInventoryLedgerContract(
     const OTHER_ORG = "0199a1f0-0000-7000-8000-000000000002";
     const ITEM = "0199a1f0-0000-7000-8000-000000000004";
     const LOCATION = "0199a1f0-0000-7000-8000-000000000005";
+    const OTHER_LOCATION = "0199a1f0-0000-7000-8000-000000000006";
+    const ORDER = "0199a1f0-0000-7000-8000-00000000000a";
+    const OTHER_ORDER = "0199a1f0-0000-7000-8000-00000000000b";
 
     function receipt(quantity: string): LedgerEntryDraft {
       return {
@@ -250,6 +253,222 @@ export function runInventoryLedgerContract(
           receipt("1"),
         ]);
         expect(BigInt(b.revision) > BigInt(a.revision)).toBe(true);
+      } finally {
+        await dispose();
+      }
+    });
+
+    it("releases only the reservations the named order still holds", async () => {
+      const { repository, reset, dispose } = await createRepository();
+      try {
+        await reset();
+        await repository.appendOnce("0199a1f0-0000-7000-8000-0000000000f0", ORG, [receipt("20")]);
+        await repository.appendOnce("0199a1f0-0000-7000-8000-0000000000f1", ORG, [
+          { ...reservation("4"), metadata: { orderId: ORDER } },
+        ]);
+        // A second order on the same item and location. Releasing by item would
+        // free this too, and the projection alone cannot tell the two apart.
+        await repository.appendOnce("0199a1f0-0000-7000-8000-0000000000f2", ORG, [
+          { ...reservation("7"), metadata: { orderId: OTHER_ORDER } },
+        ]);
+
+        const result = await repository.releaseOrder(
+          "0199a1f0-0000-7000-8000-0000000000f3",
+          ORG,
+          ORDER,
+          LOCATION,
+          "CANCELLED",
+        );
+
+        expect(result.duplicate).toBe(false);
+        expect(result.entries).toHaveLength(1);
+        expect(result.entries[0]!.cause).toBe("RESERVATION_RELEASE");
+        expect(result.entries[0]!.reservedDelta).toBe("-4");
+        expect(result.entries[0]!.metadata).toEqual({ orderId: ORDER, reason: "CANCELLED" });
+        expect((await repository.getProjection(ORG, ITEM, LOCATION)).reserved).toBe("7");
+      } finally {
+        await dispose();
+      }
+    });
+
+    it("releases a partly released order down to what is still outstanding", async () => {
+      const { repository, reset, dispose } = await createRepository();
+      try {
+        await reset();
+        await repository.appendOnce("0199a1f0-0000-7000-8000-0000000000f4", ORG, [receipt("30")]);
+        await repository.appendOnce("0199a1f0-0000-7000-8000-0000000000f5", ORG, [
+          { ...reservation("9"), metadata: { orderId: ORDER } },
+        ]);
+        // A partial hand-back already recorded against the same order, so a
+        // release computed from the gross reservation would over-release by 2.
+        await repository.appendOnce("0199a1f0-0000-7000-8000-0000000000f6", ORG, [
+          { ...release("2"), metadata: { orderId: ORDER } },
+        ]);
+
+        const result = await repository.releaseOrder(
+          "0199a1f0-0000-7000-8000-0000000000f7",
+          ORG,
+          ORDER,
+          LOCATION,
+          "REFUNDED",
+        );
+
+        expect(result.entries[0]!.reservedDelta).toBe("-7");
+        expect((await repository.getProjection(ORG, ITEM, LOCATION)).reserved).toBe("0");
+      } finally {
+        await dispose();
+      }
+    });
+
+    it("posts nothing for an order with nothing outstanding", async () => {
+      const { repository, reset, dispose } = await createRepository();
+      try {
+        await reset();
+        await repository.appendOnce("0199a1f0-0000-7000-8000-0000000000f8", ORG, [receipt("12")]);
+        await repository.appendOnce("0199a1f0-0000-7000-8000-0000000000f9", ORG, [
+          { ...reservation("5"), metadata: { orderId: ORDER } },
+        ]);
+        await repository.releaseOrder(
+          "0199a1f0-0000-7000-8000-0000000000fa",
+          ORG,
+          ORDER,
+          LOCATION,
+          "FULFILLED",
+        );
+
+        // A second release under a fresh command id: idempotency cannot be what
+        // saves this, only the order having nothing left to give back.
+        const second = await repository.releaseOrder(
+          "0199a1f0-0000-7000-8000-0000000000fb",
+          ORG,
+          ORDER,
+          LOCATION,
+          "SUPERSEDED",
+        );
+
+        expect(second.duplicate).toBe(false);
+        expect(second.entries).toEqual([]);
+        expect(BigInt(second.revision) > 0n).toBe(true);
+        expect((await repository.getProjection(ORG, ITEM, LOCATION)).reserved).toBe("0");
+        expect(await repository.listEntries(ORG, ITEM)).toHaveLength(3);
+
+        // Posting no rows does not make it an unrecorded command: a retry of an
+        // empty release must be recognised rather than evaluated afresh, or the
+        // exactly-once promise holds only for commands that happened to write.
+        const replayed = await repository.releaseOrder(
+          "0199a1f0-0000-7000-8000-0000000000fb",
+          ORG,
+          ORDER,
+          LOCATION,
+          "SUPERSEDED",
+        );
+        expect(replayed.duplicate).toBe(true);
+        expect(replayed.revision).toBe(second.revision);
+      } finally {
+        await dispose();
+      }
+    });
+
+    it("does not turn an over-released order back into a reservation", async () => {
+      const { repository, reset, dispose } = await createRepository();
+      try {
+        await reset();
+        await repository.appendOnce("0199a1f0-0000-7000-8000-000000000f07", ORG, [receipt("40")]);
+        // One order holds 5, so the item's own reserved stays non-negative and
+        // the release below is accepted on its own terms...
+        await repository.appendOnce("0199a1f0-0000-7000-8000-000000000f08", ORG, [
+          { ...reservation("5"), metadata: { orderId: OTHER_ORDER } },
+        ]);
+        // ...while THIS order nets to -3, having been given back more than it
+        // ever took. Negating that would post a release that reserves.
+        await repository.appendOnce("0199a1f0-0000-7000-8000-000000000f09", ORG, [
+          { ...release("3"), metadata: { orderId: ORDER } },
+        ]);
+
+        const result = await repository.releaseOrder(
+          "0199a1f0-0000-7000-8000-000000000f0a",
+          ORG,
+          ORDER,
+          LOCATION,
+          "CANCELLED",
+        );
+
+        expect(result.entries).toEqual([]);
+        expect((await repository.getProjection(ORG, ITEM, LOCATION)).reserved).toBe("2");
+      } finally {
+        await dispose();
+      }
+    });
+
+    it("replays a release under the same command id without releasing twice", async () => {
+      const { repository, reset, dispose } = await createRepository();
+      try {
+        await reset();
+        await repository.appendOnce("0199a1f0-0000-7000-8000-0000000000fc", ORG, [receipt("15")]);
+        await repository.appendOnce("0199a1f0-0000-7000-8000-0000000000fd", ORG, [
+          { ...reservation("6"), metadata: { orderId: ORDER } },
+        ]);
+
+        const commandId = "0199a1f0-0000-7000-8000-0000000000fe";
+        const first = await repository.releaseOrder(commandId, ORG, ORDER, LOCATION, "CANCELLED");
+        const second = await repository.releaseOrder(commandId, ORG, ORDER, LOCATION, "CANCELLED");
+
+        expect(first.duplicate).toBe(false);
+        expect(second.duplicate).toBe(true);
+        expect(second.revision).toBe(first.revision);
+        expect(await repository.listEntries(ORG, ITEM)).toHaveLength(3);
+      } finally {
+        await dispose();
+      }
+    });
+
+    it("does not release another organization's reservation", async () => {
+      const { repository, reset, dispose } = await createRepository();
+      try {
+        await reset();
+        await repository.appendOnce("0199a1f0-0000-7000-8000-000000000f01", OTHER_ORG, [
+          receipt("18"),
+        ]);
+        await repository.appendOnce("0199a1f0-0000-7000-8000-000000000f02", OTHER_ORG, [
+          { ...reservation("8"), metadata: { orderId: ORDER } },
+        ]);
+
+        // Same order id, wrong tenant. Order ids are not globally unique across
+        // organizations, so the scope has to come from the caller's session.
+        const result = await repository.releaseOrder(
+          "0199a1f0-0000-7000-8000-000000000f03",
+          ORG,
+          ORDER,
+          LOCATION,
+          "CANCELLED",
+        );
+
+        expect(result.entries).toEqual([]);
+        expect((await repository.getProjection(OTHER_ORG, ITEM, LOCATION)).reserved).toBe("8");
+      } finally {
+        await dispose();
+      }
+    });
+
+    it("does not release a reservation held at a different location", async () => {
+      const { repository, reset, dispose } = await createRepository();
+      try {
+        await reset();
+        await repository.appendOnce("0199a1f0-0000-7000-8000-000000000f04", ORG, [receipt("25")]);
+        await repository.appendOnce("0199a1f0-0000-7000-8000-000000000f05", ORG, [
+          { ...reservation("3"), metadata: { orderId: ORDER } },
+        ]);
+
+        const result = await repository.releaseOrder(
+          "0199a1f0-0000-7000-8000-000000000f06",
+          ORG,
+          ORDER,
+          OTHER_LOCATION,
+          "CANCELLED",
+        );
+
+        expect(result.entries).toEqual([]);
+        expect((await repository.getProjection(ORG, ITEM, LOCATION)).reserved).toBe("3");
       } finally {
         await dispose();
       }

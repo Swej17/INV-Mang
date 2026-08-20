@@ -74,101 +74,136 @@ export class PostgresInventoryLedgerRepository implements InventoryLedgerReposit
     entries: readonly LedgerEntryDraft[],
   ): Promise<AppendResult> {
     return this.sql.begin(async (tx) => {
-      // Idempotency first: a replay returns the original result and posts
-      // nothing, so a client retrying an unacknowledged command is safe.
-      //
-      // Scoped by organization because commandId is client-supplied. Without the
-      // filter, one tenant naming an id another has used receives that tenant's
-      // stored entries as a "duplicate" while its own command silently never
-      // applies.
-      const existing = await tx`
-        SELECT result_json FROM processed_commands
-        WHERE command_id = ${commandId} AND organization_id = ${organizationId}
-      `;
-      if (existing.length > 0) {
-        const original = existing[0]!["result_json"] as AppendResult;
-        return { ...original, duplicate: true };
-      }
+      const replay = await this.findReplay(tx, commandId, organizationId);
+      if (replay) return replay;
 
-      // Serialise per item/location. advisory locks rather than SELECT FOR
-      // UPDATE because the first command for an item has no row to lock yet.
-      const scopes = [
-        ...new Set(entries.map((e) => `${organizationId}:${e.itemId}:${e.locationId}`)),
-      ].sort();
-      for (const scope of scopes) {
-        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${scope}, 0))`;
-      }
-
-      const revision = (
-        await tx`SELECT nextval('inventory_revision_seq')::text AS revision`
-      )[0]!["revision"] as string;
-
-      const records: LedgerEntryRecord[] = [];
-      for (const draft of entries) {
-        records.push({
-          ...draft,
-          // Quantised before the value is used for validation OR returned, so
-          // the caller, the check and the row all agree.
-          onHandDelta: quantise(draft.onHandDelta),
-          reservedDelta: quantise(draft.reservedDelta),
-          incomingDelta: quantise(draft.incomingDelta),
-          eventId: randomUUID(),
-          commandId,
-          organizationId,
-          revision,
-        });
-      }
+      await lockScopes(tx, organizationId, entries);
+      const revision = await mintRevision(tx);
+      const records = buildRecords(commandId, organizationId, revision, entries);
 
       // Validate the resulting state BEFORE writing anything. Postgres would
       // roll the transaction back anyway, but a typed error is more useful to
       // the sync layer than a constraint violation.
-      await this.assertResultingStateIsValid(tx, organizationId, entries, records);
+      await this.assertResultingStateIsValid(tx, organizationId, records);
 
       const result: AppendResult = { revision, duplicate: false, entries: records };
-
-      // command_id stays the global primary key, so this insert conflicts
-      // whenever the lookup above missed a row that another transaction has
-      // since committed. The catch is scoped to this ONE statement so the
-      // conflict is known to be about a command id and not some other
-      // constraint; who owns that id is decided by resolveCommandIdConflict,
-      // which needs a connection this aborted transaction can no longer offer.
-      try {
-        await tx`
-          INSERT INTO processed_commands (command_id, organization_id, result_json)
-          VALUES (${commandId}, ${organizationId}, ${tx.json(result as never)})
-        `;
-      } catch (error) {
-        if (isUniqueViolation(error)) throw new CommandIdCollisionError(commandId);
-        throw error;
-      }
-
-      for (const record of records) {
-        await tx`
-          INSERT INTO inventory_ledger_entries (
-            id, organization_id, location_id, item_id, command_id, cause,
-            on_hand_delta, reserved_delta, incoming_delta, occurred_at, revision,
-            compensates_event_id, metadata
-          ) VALUES (
-            ${record.eventId}, ${organizationId}, ${record.locationId}, ${record.itemId},
-            ${commandId}, ${record.cause}, ${record.onHandDelta}, ${record.reservedDelta},
-            ${record.incomingDelta}, ${record.occurredAt}, ${revision},
-            ${record.compensatesEventId ?? null}, ${tx.json((record.metadata ?? {}) as never)}
-          )
-        `;
-      }
-
+      await persist(tx, commandId, organizationId, result);
       return result;
     });
+  }
+
+  /**
+   * Hand an order's outstanding reservations back, exactly once.
+   *
+   * The amounts are derived from the order's own history rather than supplied
+   * by the caller: a client that has been offline cannot know how much of its
+   * order the server still holds, and a caller-supplied figure that overshoots
+   * would drive reserved negative — the failure InvalidLedgerStateError exists
+   * to catch, reached here by design rather than by accident.
+   */
+  async releaseOrder(
+    commandId: string,
+    organizationId: string,
+    orderId: string,
+    locationId: string,
+    reason: string,
+  ): Promise<AppendResult> {
+    try {
+      return await this.releaseInTransaction(commandId, organizationId, orderId, locationId, reason);
+    } catch (error) {
+      if (!(error instanceof CommandIdCollisionError)) throw error;
+      return this.resolveCommandIdConflict(commandId, organizationId, error);
+    }
+  }
+
+  private async releaseInTransaction(
+    commandId: string,
+    organizationId: string,
+    orderId: string,
+    locationId: string,
+    reason: string,
+  ): Promise<AppendResult> {
+    return this.sql.begin(async (tx) => {
+      const replay = await this.findReplay(tx, commandId, organizationId);
+      if (replay) return replay;
+
+      // Read the outstanding reservations twice. The first read only says WHICH
+      // item/location scopes this order touches — there is nothing to lock
+      // before that is known — and the second, taken under those locks, says how
+      // much each still holds. Without the second read a reservation committed
+      // in between would be released at a stale figure.
+      //
+      // A scope that appears only in the second read is deliberately left for a
+      // later release: it was reserved after this release began, and posting
+      // against a scope whose lock we do not hold is exactly the double-write
+      // the locks exist to prevent.
+      const discovered = await outstandingReservations(tx, organizationId, orderId, locationId);
+      await lockScopes(tx, organizationId, discovered);
+      const locked = new Set(discovered.map((scope) => `${scope.itemId}|${scope.locationId}`));
+      const outstanding = (
+        await outstandingReservations(tx, organizationId, orderId, locationId)
+      ).filter((scope) => locked.has(`${scope.itemId}|${scope.locationId}`));
+
+      // Server-minted, so the occurrence time is the server's: unlike a receipt
+      // or an adjustment, nothing happened on the client to date this from.
+      const occurredAt = new Date().toISOString();
+      const entries: LedgerEntryDraft[] = outstanding.map((scope) => ({
+        itemId: scope.itemId,
+        locationId: scope.locationId,
+        cause: "RESERVATION_RELEASE",
+        onHandDelta: "0",
+        reservedDelta: assertCanonicalDecimal(scope.net).negated().toFixed(),
+        incomingDelta: "0",
+        occurredAt,
+        metadata: { orderId, reason },
+      }));
+
+      const revision = await mintRevision(tx);
+      const records = buildRecords(commandId, organizationId, revision, entries);
+      await this.assertResultingStateIsValid(tx, organizationId, records);
+
+      // An order holding nothing outstanding still records the command and
+      // consumes a revision, and posts no rows. The client cannot know the
+      // order was already empty, so an empty release is a legitimate no-op
+      // rather than an error — and a zero-delta row would violate the
+      // moves_something constraint anyway.
+      const result: AppendResult = { revision, duplicate: false, entries: records };
+      await persist(tx, commandId, organizationId, result);
+      return result;
+    });
+  }
+
+  /**
+   * The stored result for a command already applied by this organization.
+   *
+   * A replay returns the original result and posts nothing, so a client
+   * retrying an unacknowledged command is safe.
+   *
+   * Scoped by organization because commandId is client-supplied. Without the
+   * filter, one tenant naming an id another has used receives that tenant's
+   * stored entries as a "duplicate" while its own command silently never
+   * applies.
+   */
+  private async findReplay(
+    tx: Sql,
+    commandId: string,
+    organizationId: string,
+  ): Promise<AppendResult | null> {
+    const existing = await tx`
+      SELECT result_json FROM processed_commands
+      WHERE command_id = ${commandId} AND organization_id = ${organizationId}
+    `;
+    if (existing.length === 0) return null;
+    return { ...(existing[0]!["result_json"] as AppendResult), duplicate: true };
   }
 
   /** Reject any command that would drive committed stock invalid. */
   private async assertResultingStateIsValid(
     tx: Sql,
     organizationId: string,
-    drafts: readonly LedgerEntryDraft[],
     records: readonly LedgerEntryRecord[],
   ): Promise<void> {
-    const scopes = [...new Set(drafts.map((e) => `${e.itemId}|${e.locationId}`))];
+    const scopes = [...new Set(records.map((e) => `${e.itemId}|${e.locationId}`))];
     for (const scope of scopes) {
       const [itemId, locationId] = scope.split("|") as [string, string];
       const current = await this.readEntries(tx, organizationId, itemId);
@@ -293,6 +328,133 @@ export class PostgresInventoryLedgerRepository implements InventoryLedgerReposit
     itemId: string,
   ): Promise<readonly LedgerEntryRecord[]> {
     return this.readEntries(this.sql, organizationId, itemId);
+  }
+}
+
+type LedgerScope = Readonly<{ itemId: string; locationId: string }>;
+
+/**
+ * Serialise per item/location.
+ *
+ * Advisory locks rather than SELECT FOR UPDATE because the first command for an
+ * item has no row to lock yet. Sorted, so two transactions wanting the same two
+ * scopes cannot each hold one and wait for the other.
+ */
+async function lockScopes(
+  tx: Sql,
+  organizationId: string,
+  scopes: readonly LedgerScope[],
+): Promise<void> {
+  const keys = [
+    ...new Set(scopes.map((scope) => `${organizationId}:${scope.itemId}:${scope.locationId}`)),
+  ].sort();
+  for (const key of keys) {
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+  }
+}
+
+/** A sequence rather than max()+1, so concurrent commands cannot share one. */
+async function mintRevision(tx: Sql): Promise<string> {
+  const rows = await tx`SELECT nextval('inventory_revision_seq')::text AS revision`;
+  return rows[0]!["revision"] as string;
+}
+
+function buildRecords(
+  commandId: string,
+  organizationId: string,
+  revision: string,
+  entries: readonly LedgerEntryDraft[],
+): LedgerEntryRecord[] {
+  return entries.map((draft) => ({
+    ...draft,
+    // Quantised before the value is used for validation OR returned, so the
+    // caller, the check and the row all agree.
+    onHandDelta: quantise(draft.onHandDelta),
+    reservedDelta: quantise(draft.reservedDelta),
+    incomingDelta: quantise(draft.incomingDelta),
+    eventId: randomUUID(),
+    commandId,
+    organizationId,
+    revision,
+  }));
+}
+
+/**
+ * Each item/location this order still holds reservation against, and how much.
+ *
+ * Net, not gross: an order that was partly handed back already has
+ * RESERVATION_RELEASE rows of its own, and releasing the gross reservation
+ * would give back stock twice.
+ *
+ * Strictly positive, not merely non-zero. A zero net has nothing to release and
+ * its row would move nothing, which the moves_something constraint forbids. A
+ * NEGATIVE net means the order has already been given back more than it ever
+ * took, and negating it would post a release that RESERVES — turning a
+ * cancellation into a promise of stock.
+ */
+async function outstandingReservations(
+  tx: Sql,
+  organizationId: string,
+  orderId: string,
+  locationId: string,
+): Promise<readonly (LedgerScope & { net: string })[]> {
+  const rows = await tx`
+    SELECT item_id, location_id, SUM(reserved_delta)::text AS net
+    FROM inventory_ledger_entries
+    WHERE organization_id = ${organizationId}
+      AND location_id = ${locationId}
+      AND metadata->>'orderId' = ${orderId}
+      AND cause IN ('ORDER_RESERVATION', 'RESERVATION_RELEASE')
+    GROUP BY item_id, location_id
+    HAVING SUM(reserved_delta) > 0
+    ORDER BY item_id ASC
+  `;
+  return rows.map((row) => ({
+    itemId: String(row["item_id"]),
+    locationId: String(row["location_id"]),
+    net: normalise(String(row["net"])),
+  }));
+}
+
+/**
+ * Record the command, then its entries.
+ *
+ * command_id stays the global primary key, so this insert conflicts whenever
+ * the replay lookup missed a row that another transaction has since committed.
+ * The catch is scoped to this ONE statement so the conflict is known to be about
+ * a command id and not some other constraint; who owns that id is decided by
+ * resolveCommandIdConflict, which needs a connection this aborted transaction
+ * can no longer offer.
+ */
+async function persist(
+  tx: Sql,
+  commandId: string,
+  organizationId: string,
+  result: AppendResult,
+): Promise<void> {
+  try {
+    await tx`
+      INSERT INTO processed_commands (command_id, organization_id, result_json)
+      VALUES (${commandId}, ${organizationId}, ${tx.json(result as never)})
+    `;
+  } catch (error) {
+    if (isUniqueViolation(error)) throw new CommandIdCollisionError(commandId);
+    throw error;
+  }
+
+  for (const record of result.entries) {
+    await tx`
+      INSERT INTO inventory_ledger_entries (
+        id, organization_id, location_id, item_id, command_id, cause,
+        on_hand_delta, reserved_delta, incoming_delta, occurred_at, revision,
+        compensates_event_id, metadata
+      ) VALUES (
+        ${record.eventId}, ${record.organizationId}, ${record.locationId}, ${record.itemId},
+        ${record.commandId}, ${record.cause}, ${record.onHandDelta}, ${record.reservedDelta},
+        ${record.incomingDelta}, ${record.occurredAt}, ${record.revision},
+        ${record.compensatesEventId ?? null}, ${tx.json((record.metadata ?? {}) as never)}
+      )
+    `;
   }
 }
 

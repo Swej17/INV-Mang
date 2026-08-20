@@ -63,6 +63,24 @@ export interface InventoryLedgerRepository {
   ): Promise<AppendResult>;
 
   /**
+   * Hand back whatever one order still has reserved at one location.
+   *
+   * The amounts are the adapter's to derive from the order's own reservation
+   * history, not the caller's to supply: a client that has been offline cannot
+   * know how much the server still holds, and an overshooting figure would
+   * drive reserved negative. Idempotent on `commandId` like `appendOnce`, and
+   * an order with nothing outstanding is a recorded no-op rather than an error
+   * — the client cannot know the order was already empty.
+   */
+  releaseOrder(
+    commandId: string,
+    organizationId: string,
+    orderId: string,
+    locationId: string,
+    reason: string,
+  ): Promise<AppendResult>;
+
+  /**
    * Derived stock for one item at one location, within ONE organization.
    *
    * organizationId is not optional and is not inferable from the item: two
