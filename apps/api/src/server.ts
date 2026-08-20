@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import cookie from "@fastify/cookie";
 import {
   InventoryCommandV1,
-  SyncPullRequestV1,
+  SyncPullQueryV1,
   SyncPushRequestV1,
   SyncPushResultV1,
   type InventoryCommand,
@@ -419,24 +419,15 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
 
   app.get("/v1/sync/pull", { preHandler: [requireSession] }, async (request, reply) => {
     const session = request.session!;
-    const query = request.query as Record<string, unknown>;
-    const since = String(query["sinceRevision"] ?? "0");
-    if (!/^\d+$/.test(since)) {
-      return reply.code(422).send({ error: "sinceRevision must be a whole number" });
+    // Bounds and defaults come from the contract rather than being restated
+    // here: a route that allowed a page or a revision format the schema
+    // forbids would be a second definition of the protocol, free to drift
+    // from the published one.
+    const parsed = SyncPullQueryV1.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(422).send({ error: "invalid pull query", issues: parsed.error.issues });
     }
-    // Bounds and default come from the contract rather than being restated
-    // here: a route that allowed a page the schema forbids would be a second
-    // definition of the protocol, free to drift from the published one.
-    const requested = query["limit"];
-    const parsedLimit = SyncPullRequestV1.shape.limit.safeParse(
-      requested === undefined ? undefined : Number(String(requested)),
-    );
-    if (!parsedLimit.success) {
-      return reply
-        .code(422)
-        .send({ error: "invalid limit", issues: parsedLimit.error.issues });
-    }
-    const limit = parsedLimit.data;
+    const { sinceRevision, limit } = parsed.data;
     // One more row than asked for, so a full page can be told apart from the
     // last page. Without that signal a client whose entries land exactly on the
     // boundary cannot know whether to come back.
@@ -445,7 +436,7 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
              on_hand_delta::text, reserved_delta::text, incoming_delta::text,
              occurred_at, revision::text
       FROM inventory_ledger_entries
-      WHERE organization_id = ${session.organizationId} AND revision > ${since}::bigint
+      WHERE organization_id = ${session.organizationId} AND revision > ${sinceRevision}::bigint
       ORDER BY revision ASC
       LIMIT ${limit + 1}
     `;

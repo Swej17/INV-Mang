@@ -240,7 +240,7 @@ describe("CSRF", () => {
     const session = await login();
     const response = await app.inject({
       method: "GET",
-      url: "/v1/sync/pull?sinceRevision=0",
+      url: "/v1/sync/pull?version=1&deviceId=workshop-laptop&sinceRevision=0",
       cookies: { [SESSION_COOKIE]: session.cookieValue },
     });
     expect(response.statusCode).toBe(200);
@@ -770,7 +770,14 @@ describe("sync pull", () => {
     });
   }
 
+  // version and deviceId are baked in so the existing call sites below don't
+  // each need to spell out the whole query; pullRaw is for the tests that
+  // exercise those two fields directly.
   async function pull(session: Awaited<ReturnType<typeof login>>, query: string) {
+    return pullRaw(session, `version=1&deviceId=workshop-laptop&${query}`);
+  }
+
+  async function pullRaw(session: Awaited<ReturnType<typeof login>>, query: string) {
     return app.inject({
       method: "GET",
       url: `/v1/sync/pull?${query}`,
@@ -816,6 +823,36 @@ describe("sync pull", () => {
     expect((await pull(session, "sinceRevision=0&limit=1001")).statusCode).toBe(422);
     expect((await pull(session, "sinceRevision=0&limit=ten")).statusCode).toBe(422);
     expect((await pull(session, "sinceRevision=0&limit=1000")).statusCode).toBe(200);
+  });
+
+  it("defaults sinceRevision to the start of history when omitted", async () => {
+    const session = await login();
+    await seedEntries(session, 2);
+    // No sinceRevision at all, unlike every other test in this suite.
+    const response = await pull(session, "limit=10");
+    expect(response.statusCode).toBe(200);
+    expect(response.json().entries).toHaveLength(2);
+  });
+
+  it("rejects a pull with no deviceId", async () => {
+    const session = await login();
+    const response = await pullRaw(session, "version=1&sinceRevision=0&limit=10");
+    expect(response.statusCode).toBe(422);
+  });
+
+  it("rejects a pull with no version", async () => {
+    const session = await login();
+    const response = await pullRaw(session, "deviceId=workshop-laptop&sinceRevision=0&limit=10");
+    expect(response.statusCode).toBe(422);
+  });
+
+  it("rejects a pull declaring a version the server does not speak", async () => {
+    const session = await login();
+    const response = await pullRaw(
+      session,
+      "version=2&deviceId=workshop-laptop&sinceRevision=0&limit=10",
+    );
+    expect(response.statusCode).toBe(422);
   });
 });
 

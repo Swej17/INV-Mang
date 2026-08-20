@@ -31,6 +31,7 @@ export {
 
 export {
   type SyncConflict,
+  type SyncPullQuery,
   type SyncPushRequest,
   type SyncPushResult,
   AcceptedCommandV1,
@@ -38,6 +39,7 @@ export {
   ConflictCode,
   ConflictResolution,
   SyncConflictV1,
+  SyncPullQueryV1,
   SyncPullRequestV1,
   SyncPushRequestV1,
   SyncPushResultV1,

@@ -75,6 +75,28 @@ export const SyncPullRequestV1 = z.object({
   limit: z.int().positive().max(1000).default(500),
 });
 
+/**
+ * Query-string form of a pull request.
+ *
+ * `/v1/sync/pull` is a GET, so its parameters arrive as strings rather than
+ * the JSON-typed body `SyncPullRequestV1` describes. Forcing that schema onto
+ * a query string verbatim would fail on every request: `version` requires the
+ * JS number `1`, and `limit` requires a JS number, but a query string can only
+ * ever hand either one back as `"1"`. This schema exists to coerce exactly
+ * those two fields; `deviceId` and `sinceRevision` keep the identical shape
+ * and meaning as the body schema. `sinceRevision` defaults to `"0"` here
+ * (full history) since a GET naturally supports omission as "give me
+ * everything" — the body schema leaves it required because a push always
+ * carries an explicit `knownRevision` alongside it.
+ */
+export const SyncPullQueryV1 = z.object({
+  version: z.coerce.number().pipe(z.literal(1)),
+  deviceId: z.string().min(1),
+  sinceRevision: Revision.default("0"),
+  limit: z.coerce.number().int().positive().max(1000).default(500),
+});
+
 export type SyncConflict = z.infer<typeof SyncConflictV1>;
 export type SyncPushRequest = z.infer<typeof SyncPushRequestV1>;
 export type SyncPushResult = z.infer<typeof SyncPushResultV1>;
+export type SyncPullQuery = z.infer<typeof SyncPullQueryV1>;
