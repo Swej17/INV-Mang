@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import postgres, { type Sql } from "postgres";
 
+import { migrateToHead } from "../migrations/runner.js";
+
 /**
  * Disposable PostgreSQL database for integration tests.
  *
@@ -65,4 +67,19 @@ export async function createDisposableDatabase(): Promise<DisposableDatabase> {
       }
     },
   };
+}
+
+/**
+ * A disposable database already migrated to head.
+ *
+ * This is what an integration test should ask for by default: the real
+ * schema, not a hand-picked subset that could never exist in production. A
+ * test that genuinely needs a partial or pre-upgrade schema should say so
+ * explicitly — call `createDisposableDatabase()` and apply migrations itself
+ * — rather than reintroducing a subset silently.
+ */
+export async function createMigratedDatabase(): Promise<DisposableDatabase> {
+  const database = await createDisposableDatabase();
+  await migrateToHead(database.sql);
+  return database;
 }

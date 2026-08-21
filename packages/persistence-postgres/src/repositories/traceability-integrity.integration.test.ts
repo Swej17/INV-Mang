@@ -1,10 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
-import { createDisposableDatabase, type DisposableDatabase } from "../testing/disposable-postgres.js";
+import { createMigratedDatabase, type DisposableDatabase } from "../testing/disposable-postgres.js";
 
 /**
  * The traceability records, against REAL PostgreSQL.
@@ -21,10 +19,6 @@ import { createDisposableDatabase, type DisposableDatabase } from "../testing/di
 
 const ORG = "0199a1f0-0000-7000-8000-000000000001";
 const LOCATION = "0199a1f0-0000-7000-8000-000000000005";
-
-function migration(name: string): string {
-  return readFileSync(fileURLToPath(new URL(`../../drizzle/${name}`, import.meta.url)), "utf8");
-}
 
 let db: DisposableDatabase;
 
@@ -75,11 +69,7 @@ async function seedTracedBatch(): Promise<{ batchId: string; lotId: string; trac
 
 beforeEach(async () => {
   if (!db) {
-    db = await createDisposableDatabase();
-    await db.sql.unsafe(migration("0001_inventory_ledger.sql"));
-    await db.sql.unsafe(migration("0002_items_recipes.sql"));
-    await db.sql.unsafe(migration("0003_lots_production.sql"));
-    await db.sql.unsafe(migration("0008_traceability_integrity.sql"));
+    db = await createMigratedDatabase();
   }
 });
 

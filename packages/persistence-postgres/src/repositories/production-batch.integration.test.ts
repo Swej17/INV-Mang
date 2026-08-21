@@ -1,11 +1,8 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
 import { CompleteProductionBatch } from "@simple-flame/application";
 import { convertQuantity, type RecipeComponent } from "@simple-flame/domain";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
-import { createDisposableDatabase, type DisposableDatabase } from "../testing/disposable-postgres.js";
+import { createMigratedDatabase, type DisposableDatabase } from "../testing/disposable-postgres.js";
 import { PostgresInventoryLedgerRepository } from "./postgres-inventory-ledger.js";
 
 /**
@@ -23,10 +20,6 @@ const VESSEL = "0199a200-0000-7000-8000-000000000003";
 const FINISHED = "0199a200-0000-7000-8000-0000000000b1";
 const RECIPE = "0199a200-0000-7000-8000-0000000000a1";
 const LOCATION = "0199a1f0-0000-7000-8000-000000000005";
-
-function migration(name: string): string {
-  return readFileSync(fileURLToPath(new URL(`../../drizzle/${name}`, import.meta.url)), "utf8");
-}
 
 function oz(count: string): string {
   return convertQuantity({ value: count, unit: "OUNCE" }, "GRAM").value;
@@ -69,10 +62,7 @@ function useCase(): CompleteProductionBatch {
 
 beforeEach(async () => {
   if (!database) {
-    database = await createDisposableDatabase();
-    await database.sql.unsafe(migration("0001_inventory_ledger.sql"));
-    await database.sql.unsafe(migration("0002_items_recipes.sql"));
-    await database.sql.unsafe(migration("0003_lots_production.sql"));
+    database = await createMigratedDatabase();
   }
   await database.sql.unsafe(
     "TRUNCATE inventory_ledger_entries, processed_commands RESTART IDENTITY CASCADE",

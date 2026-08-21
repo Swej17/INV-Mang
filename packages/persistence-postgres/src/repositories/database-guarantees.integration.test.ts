@@ -9,7 +9,8 @@ import {
 import postgres from "postgres";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
-import { createDisposableDatabase, type DisposableDatabase } from "../testing/disposable-postgres.js";
+import { migrateTo } from "../migrations/runner.js";
+import { createDisposableDatabase, createMigratedDatabase, type DisposableDatabase } from "../testing/disposable-postgres.js";
 import { PostgresInventoryLedgerRepository } from "./postgres-inventory-ledger.js";
 
 /**
@@ -52,9 +53,7 @@ function receipt(quantity: string, locationId = LOCATION) {
 
 beforeEach(async () => {
   if (!db) {
-    db = await createDisposableDatabase();
-    await db.sql.unsafe(migration("0001_inventory_ledger.sql"));
-    await db.sql.unsafe(migration("0007_purchase_ordered_cause.sql"));
+    db = await createMigratedDatabase();
   }
   await db.sql.unsafe("TRUNCATE inventory_ledger_entries, processed_commands RESTART IDENTITY CASCADE");
   await db.sql.unsafe("ALTER SEQUENCE inventory_revision_seq RESTART WITH 1");
@@ -375,7 +374,12 @@ describe("0007 purchase-ordered cause migration", () => {
   beforeEach(async () => {
     if (!upgraded) {
       upgraded = await createDisposableDatabase();
-      await upgraded.sql.unsafe(migration("0001_inventory_ledger.sql"));
+      // Deliberate exception to "every test migrates to head": this suite
+      // simulates upgrading an OLD database, so it must start BELOW head —
+      // at head, 0007's ALTER would already be in effect and every test below
+      // would pass vacuously. migrateTo(..., "0001") stops short on purpose;
+      // this is an opt-out with a stated reason, not a leftover subset.
+      await migrateTo(upgraded.sql, "0001");
     }
   });
 
@@ -403,6 +407,10 @@ describe("0007 purchase-ordered cause migration", () => {
   });
 
   it("accepts the new cause after the migration runs", async () => {
+    // Raw re-application, not migrateTo: the runner treats an already-recorded
+    // version as a no-op, which is correct for a real deployment but would
+    // make "is safe to run twice" below vacuous. This applies the file body
+    // itself, the same way an operator's accidental re-run would.
     await upgraded.sql.unsafe(migration("0007_purchase_ordered_cause.sql"));
     await expect(insertCause("PURCHASE_ORDERED")).resolves.toBeUndefined();
   });

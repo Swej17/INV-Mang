@@ -1,10 +1,7 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
 import { runInventoryLedgerContract } from "@simple-flame/persistence-contracts/contract";
 import { afterAll } from "vitest";
 
-import { createDisposableDatabase, type DisposableDatabase } from "../testing/disposable-postgres.js";
+import { createMigratedDatabase, type DisposableDatabase } from "../testing/disposable-postgres.js";
 import { PostgresInventoryLedgerRepository } from "./postgres-inventory-ledger.js";
 
 /**
@@ -15,17 +12,11 @@ import { PostgresInventoryLedgerRepository } from "./postgres-inventory-ledger.j
  * transactional rollback.
  */
 
-const MIGRATION = readFileSync(
-  fileURLToPath(new URL("../../drizzle/0001_inventory_ledger.sql", import.meta.url)),
-  "utf8",
-);
-
 let database: DisposableDatabase | undefined;
 
 async function ensureStarted(): Promise<DisposableDatabase> {
   if (database) return database;
-  database = await createDisposableDatabase();
-  await database.sql.unsafe(MIGRATION);
+  database = await createMigratedDatabase();
   return database;
 }
 

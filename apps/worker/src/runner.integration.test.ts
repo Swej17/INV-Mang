@@ -1,8 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 
-import { createDisposableDatabase, type DisposableDatabase } from "@simple-flame/persistence-postgres/testing";
+import { createMigratedDatabase, type DisposableDatabase } from "@simple-flame/persistence-postgres/testing";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 import { JobRunner, type JobRecord } from "./runner.js";
@@ -16,13 +14,6 @@ import { JobRunner, type JobRecord } from "./runner.js";
  */
 
 const ORG = "0199a1f0-0000-7000-8000-000000000001";
-
-function migrationSql(name: string): string {
-  return readFileSync(
-    fileURLToPath(new URL(`../../../packages/persistence-postgres/drizzle/${name}`, import.meta.url)),
-    "utf8",
-  );
-}
 
 let db: DisposableDatabase;
 
@@ -47,9 +38,7 @@ async function statusOf(id: string): Promise<string> {
 
 beforeEach(async () => {
   if (!db) {
-    db = await createDisposableDatabase();
-    await db.sql.unsafe(migrationSql("0001_inventory_ledger.sql"));
-    await db.sql.unsafe(migrationSql("0006_auth_audit_jobs.sql"));
+    db = await createMigratedDatabase();
   }
   await db.sql.unsafe("TRUNCATE jobs");
 });

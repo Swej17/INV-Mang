@@ -1,8 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 
-import { createDisposableDatabase, type DisposableDatabase } from "@simple-flame/persistence-postgres/testing";
+import { createMigratedDatabase, type DisposableDatabase } from "@simple-flame/persistence-postgres/testing";
 import type { FastifyInstance } from "fastify";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -23,13 +21,6 @@ const ITEM_B = "0199a1f0-0000-7000-8000-000000000006";
 const LOCATION = "0199a1f0-0000-7000-8000-000000000005";
 const ORDER_A = "0199a1f0-0000-7000-8000-00000000000a";
 const ORDER_B = "0199a1f0-0000-7000-8000-00000000000b";
-
-function migrationSql(name: string): string {
-  return readFileSync(
-    fileURLToPath(new URL(`../../../../packages/persistence-postgres/drizzle/${name}`, import.meta.url)),
-    "utf8",
-  );
-}
 
 let db: DisposableDatabase;
 let app: FastifyInstance;
@@ -121,9 +112,7 @@ function releaseOf(organizationId: string, orderId: string, reason: string) {
 
 beforeEach(async () => {
   if (!db) {
-    db = await createDisposableDatabase();
-    await db.sql.unsafe(migrationSql("0001_inventory_ledger.sql"));
-    await db.sql.unsafe(migrationSql("0006_auth_audit_jobs.sql"));
+    db = await createMigratedDatabase();
     sessions = new SessionStore(db.sql);
     app = await buildServer({ sql: db.sql, sessions });
     await app.ready();
